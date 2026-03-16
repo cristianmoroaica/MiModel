@@ -6,6 +6,7 @@ mod parser;
 mod phase;
 mod preview;
 mod python;
+mod spec;
 mod stl;
 mod storage;
 mod tui;
