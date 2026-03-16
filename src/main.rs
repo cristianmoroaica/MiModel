@@ -3,6 +3,7 @@ mod config;
 mod image;
 mod model_session;
 mod parser;
+mod phase;
 mod preview;
 mod python;
 mod stl;
