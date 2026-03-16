@@ -1,0 +1,126 @@
+//! Input bar — wraps tui-textarea with submit (Ctrl+Enter) and history.
+
+use tui_textarea::{Input, Key, TextArea};
+use ratatui::style::{Color, Style};
+
+pub struct InputBar<'a> {
+    pub textarea: TextArea<'a>,
+    history: Vec<String>,
+    history_pos: Option<usize>,
+}
+
+impl<'a> InputBar<'a> {
+    pub fn new() -> Self {
+        let mut textarea = TextArea::default();
+        textarea.set_cursor_line_style(Style::default());
+        textarea.set_placeholder_text("Type what you want to build...");
+        textarea.set_block(
+            ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray))
+        );
+        Self {
+            textarea,
+            history: Vec::new(),
+            history_pos: None,
+        }
+    }
+
+    fn make_block() -> ratatui::widgets::Block<'a> {
+        ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::TOP)
+            .border_style(Style::default().fg(Color::DarkGray))
+    }
+
+    fn reset_textarea(&mut self) {
+        self.textarea = TextArea::default();
+        self.textarea.set_cursor_line_style(Style::default());
+        self.textarea.set_placeholder_text("Type what you want to build...");
+        self.textarea.set_block(Self::make_block());
+    }
+
+    fn set_textarea_content(&mut self, text: String) {
+        self.textarea = TextArea::new(vec![text]);
+        self.textarea.set_cursor_line_style(Style::default());
+        self.textarea.set_block(Self::make_block());
+    }
+
+    /// Handle input event. Returns Some(text) if user submitted (Enter).
+    /// Use backslash + Enter for newline continuation.
+    pub fn handle_input(&mut self, input: Input) -> Option<String> {
+        match input {
+            // Enter = submit (unless line ends with \ for continuation)
+            Input { key: Key::Enter, ctrl: false, alt: false, .. } => {
+                let current = self.textarea.lines().join("\n");
+                if current.ends_with('\\') {
+                    // Continuation: strip backslash, add actual newline
+                    let trimmed = current.trim_end_matches('\\').to_string();
+                    self.set_textarea_content(format!("{trimmed}\n"));
+                    // Move cursor to end
+                    self.textarea.move_cursor(tui_textarea::CursorMove::End);
+                    None
+                } else {
+                    let text = current.trim().to_string();
+                    if !text.is_empty() {
+                        self.history.push(text.clone());
+                        self.history_pos = None;
+                    }
+                    self.reset_textarea();
+                    if text.is_empty() { None } else { Some(text) }
+                }
+            }
+            // Up arrow with empty input = history back
+            Input { key: Key::Up, .. } if self.textarea.lines() == [""] => {
+                if !self.history.is_empty() {
+                    let pos = match self.history_pos {
+                        Some(p) if p > 0 => p - 1,
+                        None => self.history.len() - 1,
+                        Some(p) => p,
+                    };
+                    self.history_pos = Some(pos);
+                    let text = self.history[pos].clone();
+                    self.set_textarea_content(text);
+                }
+                None
+            }
+            // Down arrow with history active = history forward
+            Input { key: Key::Down, .. } if self.history_pos.is_some() => {
+                let pos = self.history_pos.unwrap() + 1;
+                if pos < self.history.len() {
+                    self.history_pos = Some(pos);
+                    let text = self.history[pos].clone();
+                    self.set_textarea_content(text);
+                } else {
+                    self.history_pos = None;
+                    self.reset_textarea();
+                }
+                None
+            }
+            // Everything else: pass to tui-textarea
+            input => {
+                self.textarea.input(input);
+                None
+            }
+        }
+    }
+
+    /// Get the current input text (for checking if empty, etc.).
+    pub fn text(&self) -> String {
+        self.textarea.lines().join("\n")
+    }
+
+    /// Set a prefix badge (e.g. "[2 images]").
+    pub fn set_badge(&mut self, badge: &str) {
+        let title = if badge.is_empty() {
+            String::new()
+        } else {
+            format!(" {badge} ")
+        };
+        self.textarea.set_block(
+            ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(title)
+        );
+    }
+}

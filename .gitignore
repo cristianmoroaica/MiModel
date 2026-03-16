@@ -1,0 +1,28 @@
+# Build artifacts
+target/
+
+# Python
+.venv-cadquery/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Debug/test artifacts
+stdout.txt
+stderr.txt
+claude_stderr.txt
+output.stl
+
+# Superpowers brainstorm sessions
+.superpowers/
+
+# Pytest
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai3d-cad"
+version = "0.1.0"
+description = "CadQuery/OpenSCAD execution engine for ai3d"
+requires-python = ">=3.10"
+dependencies = [
+    "cadquery>=2.4",
+    "trimesh>=4.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
