@@ -123,7 +123,7 @@ impl<'a> App<'a> {
         viewer.set_working_dir(session.temp_dir());
 
         Ok(App {
-            focus: Focus::Input,
+            focus: Focus::ProjectTree,
             busy: BusyState::Idle,
             layout_config: LayoutConfig::default(),
             project_tree,
@@ -212,20 +212,57 @@ impl<'a> App<'a> {
             self.model_panel.render(frame, panel_area, false);
         }
 
-        // Render input bar with focus highlight
+        // Render input bar with status indicators
         let bar_area = panes.input_bar;
         let input_focused = self.focus == Focus::Input;
-        if !self.pending_images.is_empty() {
-            self.input_bar.set_badge(&format!("[{} file(s)]", self.pending_images.len()));
-        } else {
-            self.input_bar.set_badge("");
-        }
         let border_color = if input_focused { Color::Cyan } else { Color::DarkGray };
+
+        // Build input bar title with status indicators
+        let mut title_spans: Vec<Span> = vec![Span::raw(" Input ")];
+
+        // Attachment indicators — separate images from PDFs
+        if !self.pending_images.is_empty() {
+            let img_count = self.pending_images.iter()
+                .filter(|p| image::is_image(p))
+                .count();
+            let pdf_count = self.pending_images.iter()
+                .filter(|p| image::is_pdf(p))
+                .count();
+            if img_count > 0 {
+                title_spans.push(Span::styled(
+                    format!(" {img_count} img "),
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                ));
+                title_spans.push(Span::raw(" "));
+            }
+            if pdf_count > 0 {
+                title_spans.push(Span::styled(
+                    format!(" {pdf_count} pdf "),
+                    Style::default().fg(Color::Black).bg(Color::Yellow),
+                ));
+                title_spans.push(Span::raw(" "));
+            }
+        }
+
+        // Busy indicator
+        if self.busy != BusyState::Idle {
+            let spinner_char = SPINNER[self.spinner_frame % SPINNER.len()];
+            let (label, color) = match self.busy {
+                BusyState::Thinking => ("Thinking", Color::Magenta),
+                BusyState::Building => ("Building", Color::Yellow),
+                BusyState::Idle => unreachable!(),
+            };
+            title_spans.push(Span::styled(
+                format!(" {spinner_char} {label} "),
+                Style::default().fg(Color::Black).bg(color),
+            ));
+        }
+
         self.input_bar.textarea.set_block(
             ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
                 .border_style(Style::default().fg(border_color))
-                .title(" Input ")
+                .title(Line::from(title_spans))
         );
         frame.render_widget(&self.input_bar.textarea, bar_area);
 
@@ -243,7 +280,7 @@ impl<'a> App<'a> {
                 Span::raw(" Save "),
                 Span::styled(" Ctrl+V ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Img "),
-                Span::styled(" q ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
+                Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Quit "),
             ]),
             Focus::ProjectTree => Line::from(vec![
@@ -256,19 +293,19 @@ impl<'a> App<'a> {
                 Span::styled(" d ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Delete "),
                 Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Switch pane "),
-                Span::styled(" Esc ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Input "),
+                Span::raw(" Panes "),
+                Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
+                Span::raw(" Quit "),
             ]),
             Focus::Conversation => Line::from(vec![
                 Span::styled(" j/k ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Scroll "),
-                Span::styled(" PgUp/Dn ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
+                Span::styled(" u/d ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Page "),
                 Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Switch pane "),
-                Span::styled(" Esc ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Input "),
+                Span::raw(" Panes "),
+                Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
+                Span::raw(" Quit "),
             ]),
         };
         frame.render_widget(Paragraph::new(legend_text), legend_area);
@@ -330,6 +367,10 @@ impl<'a> App<'a> {
                         self.conversation.add("system", "(cancelled)");
                         self.busy = BusyState::Idle;
                     }
+                } else {
+                    // Quit when idle
+                    self.cleanup();
+                    self.should_quit = true;
                 }
                 return;
             }
@@ -424,12 +465,6 @@ impl<'a> App<'a> {
 
     fn handle_input_key(&mut self, key: crossterm::event::KeyEvent) {
         use KeyCode::*;
-
-        // q to quit when input is empty and focused on input
-        if key.code == Char('q') && key.modifiers.is_empty() && self.input_bar.text().is_empty() {
-            self.should_quit = true;
-            return;
-        }
 
         // Convert key event to tui_textarea Input and handle
         let input = tui_textarea::Input::from(key);
@@ -537,8 +572,8 @@ impl<'a> App<'a> {
         match key.code {
             Up | Char('k') => self.conversation.scroll_up(1),
             Down | Char('j') => self.conversation.scroll_down(1),
-            PageUp => self.conversation.scroll_up(10),
-            PageDown => self.conversation.scroll_down(10),
+            Char('u') => self.conversation.scroll_up(10),
+            Char('d') => self.conversation.scroll_down(10),
             _ => {}
         }
     }
@@ -1107,8 +1142,13 @@ fn run_event_loop(
         terminal.draw(|f| app.render(f))?;
 
         // Drain streaming text chunks from Claude
+        let mut got_stream = false;
         while let Ok(chunk) = app.stream_rx.try_recv() {
             app.streaming_text.push_str(&chunk);
+            got_stream = true;
+        }
+        if got_stream {
+            app.conversation.scroll_to_bottom();
         }
 
         // Check background channel (final result)

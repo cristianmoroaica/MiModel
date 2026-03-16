@@ -67,6 +67,7 @@ impl ConversationPane {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.scroll_offset = 0;
+        self.auto_scroll = true;
     }
 
     /// Render the conversation into the given area. Returns max_scroll for clamping.
@@ -95,6 +96,11 @@ impl ConversationPane {
                 ]));
             }
             lines.push(Line::raw("")); // blank separator
+        }
+
+        // Bottom padding so the last message isn't flush against the border
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
         }
 
         let text = Text::from(lines);
