@@ -180,7 +180,7 @@ impl<'a> App<'a> {
         let panes = compute_layout(area, &self.layout_config);
 
         // Render project tree if visible
-        if let Some(tree_area) = panes.project_tree {
+        if let Some(tree_area) = panes.left_panel {
             self.project_tree.render(frame, tree_area, self.focus == Focus::ProjectTree);
         }
 
@@ -216,7 +216,7 @@ impl<'a> App<'a> {
         self.conversation.scroll_offset = self.conversation.scroll_offset.min(max_scroll);
 
         // Render model panel if visible
-        if let Some(panel_area) = panes.model_panel {
+        if let Some(panel_area) = panes.right_panel {
             self.model_panel.render(frame, panel_area, false);
         }
 

@@ -1,11 +1,12 @@
 //! Layout constraint calculation for the three-column + input bar TUI.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use crate::phase::Phase;
 
 pub struct PaneAreas {
-    pub project_tree: Option<Rect>,
+    pub left_panel: Option<Rect>,   // was project_tree
     pub conversation: Rect,
-    pub model_panel: Option<Rect>,
+    pub right_panel: Option<Rect>,  // was model_panel
     pub input_bar: Rect,
     pub legend: Rect,
 }
@@ -13,11 +14,12 @@ pub struct PaneAreas {
 pub struct LayoutConfig {
     pub show_sidebar: bool,
     pub show_model_panel: bool,
+    pub phase: Phase,
 }
 
 impl Default for LayoutConfig {
     fn default() -> Self {
-        Self { show_sidebar: true, show_model_panel: true }
+        Self { show_sidebar: true, show_model_panel: true, phase: Phase::Spec }
     }
 }
 
@@ -44,7 +46,7 @@ pub fn compute_layout(area: Rect, config: &LayoutConfig) -> PaneAreas {
     let legend = vertical[2];
 
     // Split main area horizontally based on visible panels
-    let (project_tree, conversation, model_panel) = match (show_sidebar, show_model) {
+    let (left_panel, conversation, right_panel) = match (show_sidebar, show_model) {
         (true, true) => {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
@@ -81,7 +83,7 @@ pub fn compute_layout(area: Rect, config: &LayoutConfig) -> PaneAreas {
         }
     };
 
-    PaneAreas { project_tree, conversation, model_panel, input_bar, legend }
+    PaneAreas { left_panel, conversation, right_panel, input_bar, legend }
 }
 
 #[cfg(test)]
@@ -93,8 +95,8 @@ mod tests {
         let area = Rect::new(0, 0, 120, 40);
         let config = LayoutConfig::default();
         let panes = compute_layout(area, &config);
-        assert!(panes.project_tree.is_some());
-        assert!(panes.model_panel.is_some());
+        assert!(panes.left_panel.is_some());
+        assert!(panes.right_panel.is_some());
         assert_eq!(panes.input_bar.height, 5);
     }
 
@@ -103,8 +105,8 @@ mod tests {
         let area = Rect::new(0, 0, 80, 40);
         let config = LayoutConfig::default();
         let panes = compute_layout(area, &config);
-        assert!(panes.project_tree.is_none()); // auto-hidden below 100
-        assert!(panes.model_panel.is_some());
+        assert!(panes.left_panel.is_none()); // auto-hidden below 100
+        assert!(panes.right_panel.is_some());
     }
 
     #[test]
@@ -112,7 +114,17 @@ mod tests {
         let area = Rect::new(0, 0, 50, 40);
         let config = LayoutConfig::default();
         let panes = compute_layout(area, &config);
-        assert!(panes.project_tree.is_none());
-        assert!(panes.model_panel.is_none());
+        assert!(panes.left_panel.is_none());
+        assert!(panes.right_panel.is_none());
+    }
+
+    #[test]
+    fn test_layout_with_phase() {
+        let area = Rect::new(0, 0, 120, 40);
+        let config = LayoutConfig { show_sidebar: true, show_model_panel: true, phase: Phase::Component };
+        let panes = compute_layout(area, &config);
+        // Layout dimensions are the same regardless of phase
+        assert!(panes.left_panel.is_some());
+        assert!(panes.right_panel.is_some());
     }
 }
