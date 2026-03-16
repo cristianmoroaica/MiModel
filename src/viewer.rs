@@ -8,6 +8,8 @@ pub struct Viewer {
     child: Option<Child>,
     /// Stable path that f3d watches. Overwritten on each build.
     working_stl: Option<PathBuf>,
+    /// Session directory — when set, working files are written here.
+    session_dir: Option<PathBuf>,
 }
 
 impl Viewer {
@@ -16,12 +18,19 @@ impl Viewer {
             preferred: preferred.to_string(),
             child: None,
             working_stl: None,
+            session_dir: None,
         }
     }
 
     /// Set the working STL directory. Creates `working.stl` path inside it.
     pub fn set_working_dir(&mut self, dir: &Path) {
         self.working_stl = Some(dir.join("working.stl"));
+    }
+
+    /// Set the session directory. When set, `update_working_stl` writes to
+    /// `session_dir/working.stl` instead of `working_dir/working.stl`.
+    pub fn set_session_dir(&mut self, dir: &Path) {
+        self.session_dir = Some(dir.to_path_buf());
     }
 
     /// Get the stable working.stl path.
@@ -31,17 +40,39 @@ impl Viewer {
 
     /// Update the working.stl with new content from the latest build.
     /// Uses write-to-temp + rename so f3d's file watcher detects the inode change.
+    /// When a session directory is set, writes to `session_dir/working.stl`.
     pub fn update_working_stl(&self, source_stl: &Path) -> Result<(), String> {
-        if let Some(ref working) = self.working_stl {
-            let tmp = working.with_extension("stl.tmp");
-            std::fs::copy(source_stl, &tmp)
-                .map_err(|e| format!("Failed to copy to temp: {e}"))?;
-            std::fs::rename(&tmp, working)
-                .map_err(|e| format!("Failed to update working.stl: {e}"))?;
-            Ok(())
+        let working = if let Some(ref sdir) = self.session_dir {
+            sdir.join("working.stl")
+        } else if let Some(ref w) = self.working_stl {
+            w.clone()
         } else {
-            Err("No working directory set".to_string())
-        }
+            return Err("No working directory set".to_string());
+        };
+        let tmp = working.with_extension("stl.tmp");
+        std::fs::copy(source_stl, &tmp)
+            .map_err(|e| format!("Failed to copy to temp: {e}"))?;
+        std::fs::rename(&tmp, &working)
+            .map_err(|e| format!("Failed to update working.stl: {e}"))?;
+        Ok(())
+    }
+
+    /// Update `working.step` with new content using the same atomic copy pattern.
+    /// Writes to `working_dir/working.step` (or `session_dir/working.step` if set).
+    pub fn update_working_step(&self, source: &Path) -> Result<(), String> {
+        let working = if let Some(ref sdir) = self.session_dir {
+            sdir.join("working.step")
+        } else if let Some(ref w) = self.working_stl {
+            w.with_file_name("working.step")
+        } else {
+            return Err("No working directory set".to_string());
+        };
+        let tmp = working.with_extension("step.tmp");
+        std::fs::copy(source, &tmp)
+            .map_err(|e| format!("Failed to copy to temp: {e}"))?;
+        std::fs::rename(&tmp, &working)
+            .map_err(|e| format!("Failed to update working.step: {e}"))?;
+        Ok(())
     }
 
     /// Launch f3d pointing at working.stl. Only launches once — subsequent
@@ -143,5 +174,16 @@ mod tests {
         assert_eq!(v.preferred, "f3d");
         assert!(v.child.is_none());
         assert!(v.working_stl.is_none());
+    }
+
+    #[test]
+    fn test_update_working_step() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut v = Viewer::new("f3d");
+        v.set_working_dir(tmp.path());
+        let src = tmp.path().join("test.step");
+        std::fs::write(&src, b"step data").unwrap();
+        v.update_working_step(&src).unwrap();
+        assert!(tmp.path().join("working.step").exists());
     }
 }
