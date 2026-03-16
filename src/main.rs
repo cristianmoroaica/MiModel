@@ -959,6 +959,10 @@ impl<'a> App<'a> {
                 self.handle_assembly_input(&clean_text);
                 return;
             }
+            Phase::Refinement => {
+                self.handle_refinement_input(&clean_text);
+                return;
+            }
             // For other phases, fall through to existing monolithic path (for now)
             _ => {}
         }
@@ -1207,6 +1211,17 @@ impl<'a> App<'a> {
                             }
                             Phase::Assembly => {
                                 // Assembly responses may contain code to rebuild, or just conversation
+                                let parsed = parser::parse_response(&response);
+                                if let Some(code_block) = parsed.code {
+                                    self.busy = BusyState::Building;
+                                    let result = self.session.build(&code_block.code, code_block.engine);
+                                    self.handle_build_result(result);
+                                } else {
+                                    self.busy = BusyState::Idle;
+                                }
+                            }
+                            Phase::Refinement => {
+                                // Refinement responses may contain updated code
                                 let parsed = parser::parse_response(&response);
                                 if let Some(code_block) = parsed.code {
                                     self.busy = BusyState::Building;
@@ -1564,9 +1579,108 @@ impl<'a> App<'a> {
         });
     }
 
-    #[allow(dead_code)]
-    fn handle_refinement_input(&mut self, _text: &str) {
-        // Will be implemented in Chunk 8: send refinement prompt, rebuild with tweaked params
+    fn handle_refinement_input(&mut self, text: &str) {
+        let trimmed = text.trim().to_lowercase();
+
+        if trimmed.starts_with("set ") {
+            // Parameter edit mode: "set PARAM_NAME value"
+            // e.g., "set OUTER_DIAMETER 42.0"
+            self.handle_param_edit(text);
+        } else if trimmed == "export" {
+            self.handle_export();
+        } else {
+            // Text feedback — scoped Claude call for one component
+            self.send_refinement_feedback(text);
+        }
+    }
+
+    fn handle_param_edit(&mut self, text: &str) {
+        // Parse "set PARAM_NAME value" format
+        let parts: Vec<&str> = text.trim().splitn(3, ' ').collect();
+        if parts.len() < 3 {
+            self.conversation.add("system", "Usage: set PARAM_NAME value (e.g., 'set OUTER_DIAMETER 42.0')");
+            return;
+        }
+
+        let param_name = parts[1].to_uppercase();
+        let value: f64 = match parts[2].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                self.conversation.add("system", &format!("Invalid number: {}", parts[2]));
+                return;
+            }
+        };
+
+        self.conversation.add("system", &format!(
+            "Parameter edit: {} = {} (zero-Claude rebuild)", param_name, value
+        ));
+
+        // In the future, this will:
+        // 1. Write params JSON
+        // 2. Call python::paramset()
+        // 3. Rebuild assembly
+        // 4. Update viewer
+        // For now, just acknowledge the change
+        self.conversation.add("system", "Parameter edit acknowledged. Full paramset integration pending PhaseSession wiring.");
+    }
+
+    fn send_refinement_feedback(&mut self, text: &str) {
+        self.busy = BusyState::Thinking;
+        self.streaming_text.clear();
+
+        let model = self.claude_model.clone();
+        let session_id = self.claude_session_id.clone();
+        let tx = self.bg_tx.clone();
+        let stream_tx = self.stream_tx.clone();
+        let bg_pid = Arc::clone(&self.bg_pid);
+        let prompt = text.to_string();
+
+        std::thread::spawn(move || {
+            let result = claude::send_with_phase_prompt(
+                &model,
+                "refinement",
+                session_id.as_deref(),
+                &prompt,
+                &[],
+                Some(&stream_tx),
+                Some(&bg_pid),
+            );
+            bg_pid.store(0, Ordering::SeqCst);
+            match result {
+                Ok((response, new_sid)) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Ok(response),
+                        session_id: new_sid.or(session_id),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Err(e),
+                        session_id: None,
+                    });
+                }
+            }
+        });
+    }
+
+    fn handle_export(&mut self) {
+        if let Some(ref session_dir) = self.active_session_dir {
+            if let Some(stl_path) = self.session.latest_stl_path() {
+                let export_stl = session_dir.join("export.stl");
+                match std::fs::copy(&stl_path, &export_stl) {
+                    Ok(_) => {
+                        self.conversation.add("system", &format!("Exported to {}", export_stl.display()));
+                    }
+                    Err(e) => {
+                        self.conversation.add("system", &format!("Export failed: {e}"));
+                    }
+                }
+            } else {
+                self.conversation.add("system", "No model to export.");
+            }
+        } else {
+            self.conversation.add("system", "No active session directory for export.");
+        }
     }
 
     // -- Component phase methods --
