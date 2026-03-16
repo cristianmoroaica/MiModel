@@ -927,9 +927,21 @@ impl<'a> App<'a> {
         self.conversation.add("user", &clean_text);
         self.session.add_user_message(&clean_text);
 
+        // Phase-specific dispatch
+        match self.phase {
+            Phase::Spec => {
+                self.send_spec_prompt(&clean_text, all_images);
+                return;
+            }
+            Phase::Decompose => {
+                self.send_decompose_prompt(&clean_text);
+                return;
+            }
+            // For other phases, fall through to existing monolithic path (for now)
+            _ => {}
+        }
+
         // Set busy state
-        // TODO(Chunk 6): This monolithic path sends all input to Claude regardless of phase.
-        // Replace with phase-specific dispatch: self.handle_{spec,decompose,component,...}_input()
         self.busy = BusyState::Thinking;
         self.streaming_text.clear();
 
@@ -969,6 +981,111 @@ impl<'a> App<'a> {
         });
     }
 
+    fn send_spec_prompt(&mut self, text: &str, images: Vec<PathBuf>) {
+        self.busy = BusyState::Thinking;
+        self.streaming_text.clear();
+
+        let model = self.claude_model.clone();
+        let session_id = self.claude_session_id.clone();
+        let tx = self.bg_tx.clone();
+        let stream_tx = self.stream_tx.clone();
+        let bg_pid = Arc::clone(&self.bg_pid);
+        let prompt = text.to_string();
+
+        std::thread::spawn(move || {
+            let result = claude::send_with_phase_prompt(
+                &model,
+                "spec",
+                session_id.as_deref(),
+                &prompt,
+                &images,
+                Some(&stream_tx),
+                Some(&bg_pid),
+            );
+            bg_pid.store(0, Ordering::SeqCst);
+            match result {
+                Ok((response, new_sid)) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Ok(response),
+                        session_id: new_sid.or(session_id),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Err(e),
+                        session_id: None,
+                    });
+                }
+            }
+        });
+    }
+
+    fn send_decompose_prompt(&mut self, text: &str) {
+        self.busy = BusyState::Thinking;
+        self.streaming_text.clear();
+
+        let model = self.claude_model.clone();
+        let session_id = self.claude_session_id.clone();
+        let tx = self.bg_tx.clone();
+        let stream_tx = self.stream_tx.clone();
+        let bg_pid = Arc::clone(&self.bg_pid);
+        let prompt = text.to_string();
+
+        std::thread::spawn(move || {
+            let result = claude::send_with_phase_prompt(
+                &model,
+                "decompose",
+                session_id.as_deref(),
+                &prompt,
+                &[],
+                Some(&stream_tx),
+                Some(&bg_pid),
+            );
+            bg_pid.store(0, Ordering::SeqCst);
+            match result {
+                Ok((response, new_sid)) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Ok(response),
+                        session_id: new_sid.or(session_id),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Err(e),
+                        session_id: None,
+                    });
+                }
+            }
+        });
+    }
+
+    fn handle_spec_response(&mut self, response: &str) {
+        // Update spec panel with the running conversation
+        let mut spec_content = self.spec_panel.content().to_string();
+
+        // Check for SPEC_COMPLETE signal
+        if response.contains("SPEC_COMPLETE") {
+            self.conversation.add("system", "Specification complete! Building spec.toml...");
+            self.conversation.add("system", "Transitioning to Decompose phase. You can review the spec in the right panel.");
+
+            // Transition to Decompose
+            self.phase = Phase::Decompose;
+            self.layout_config.phase = Phase::Decompose;
+            self.claude_session_id = None; // Fresh session for Decompose
+        } else {
+            // Append Claude's response to the spec panel for visibility
+            if !spec_content.is_empty() {
+                spec_content.push_str("\n\n");
+            }
+            spec_content.push_str(response);
+            self.spec_panel.set_content(&spec_content);
+        }
+    }
+
+    fn handle_decompose_response(&mut self, _response: &str) {
+        // Stub for Task 19 — Decompose phase response handling
+    }
+
     fn handle_bg_result(&mut self, result: BackgroundResult) {
         match result {
             BackgroundResult::ClaudeResponse { result, session_id } => {
@@ -979,20 +1096,30 @@ impl<'a> App<'a> {
 
                 match result {
                     Ok(response) => {
-                        // Parse response for code
-                        let parsed = parser::parse_response(&response);
-
                         // Add assistant message to conversation
                         self.conversation.add("assistant", &response);
                         self.session.add_assistant_message(&response);
 
-                        // If code found, build on the main session
-                        if let Some(code_block) = parsed.code {
-                            self.busy = BusyState::Building;
-                            let result = self.session.build(&code_block.code, code_block.engine);
-                            self.handle_build_result(result);
-                        } else {
-                            self.busy = BusyState::Idle;
+                        match self.phase {
+                            Phase::Spec => {
+                                self.handle_spec_response(&response);
+                                self.busy = BusyState::Idle;
+                            }
+                            Phase::Decompose => {
+                                self.handle_decompose_response(&response);
+                                self.busy = BusyState::Idle;
+                            }
+                            _ => {
+                                // Existing monolithic path: parse for code, build
+                                let parsed = parser::parse_response(&response);
+                                if let Some(code_block) = parsed.code {
+                                    self.busy = BusyState::Building;
+                                    let result = self.session.build(&code_block.code, code_block.engine);
+                                    self.handle_build_result(result);
+                                } else {
+                                    self.busy = BusyState::Idle;
+                                }
+                            }
                         }
                     }
                     Err(e) => {

@@ -262,6 +262,45 @@ pub fn send_prompt(
     Ok((full_text, captured_session_id))
 }
 
+/// Send a prompt to Claude with a phase-specific system prompt.
+/// Unlike `send_prompt()` which takes a system prompt string,
+/// this loads the prompt from a file via `prompt_builder::load_phase_system_prompt()`.
+///
+/// - `phase_name`: "spec", "decompose", "component", "assembly", or "refinement"
+/// - `session_id`: if Some, uses --resume (ignores system prompt)
+/// - Returns (response_text, captured_session_id)
+pub fn send_with_phase_prompt(
+    model: &Option<String>,
+    phase_name: &str,
+    session_id: Option<&str>,
+    prompt: &str,
+    image_paths: &[PathBuf],
+    on_text: Option<&std::sync::mpsc::Sender<String>>,
+    pid_out: Option<&std::sync::Arc<std::sync::atomic::AtomicU32>>,
+) -> Result<(String, Option<String>), String> {
+    let system_prompt = crate::prompt_builder::load_phase_system_prompt(phase_name)?;
+
+    // If we have a session_id, try resuming first
+    if let Some(sid) = session_id {
+        match send_prompt(model, &system_prompt, Some(sid), prompt, image_paths, on_text, pid_out) {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                // Check for session expiry indicators
+                let lower = e.to_lowercase();
+                if (lower.contains("session") && (lower.contains("not found") || lower.contains("expired")))
+                    || lower.contains("invalid session")
+                {
+                    // Retry without --resume (fresh session)
+                    return send_prompt(model, &system_prompt, None, prompt, image_paths, on_text, pid_out);
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    send_prompt(model, &system_prompt, None, prompt, image_paths, on_text, pid_out)
+}
+
 /// Check that the claude CLI is available.
 pub fn check_claude() -> Result<(), String> {
     let output = Command::new("claude")
@@ -304,6 +343,16 @@ mod tests {
             Option<&std::sync::mpsc::Sender<String>>,
             Option<&std::sync::Arc<std::sync::atomic::AtomicU32>>,
         ) -> Result<(String, Option<String>), String> = send_prompt;
+    }
+
+    #[test]
+    fn test_send_with_phase_prompt_signature() {
+        // Verify send_with_phase_prompt compiles with the correct signature.
+        let _: fn(
+            &Option<String>, &str, Option<&str>, &str, &[PathBuf],
+            Option<&std::sync::mpsc::Sender<String>>,
+            Option<&std::sync::Arc<std::sync::atomic::AtomicU32>>,
+        ) -> Result<(String, Option<String>), String> = send_with_phase_prompt;
     }
 
     #[test]
