@@ -3,6 +3,7 @@ pub mod input_bar;
 pub mod conversation;
 pub mod project_tree;
 pub mod model_panel;
+pub mod spec_panel;
 
 /// Focus state — which pane has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq)]
