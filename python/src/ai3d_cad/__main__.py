@@ -31,6 +31,12 @@ def main():
     assemble_parser.add_argument("--output", required=True, help="Output STL path")
     assemble_parser.add_argument("--step", default=None, help="Optional output STEP path")
 
+    paramset_parser = subparsers.add_parser("paramset", help="Re-run component with overridden parameters")
+    paramset_parser.add_argument("--code", required=True, help="Path to component .py file")
+    paramset_parser.add_argument("--params", required=True, help="Path to JSON file with parameter overrides")
+    paramset_parser.add_argument("--output", required=True, help="Output STL path")
+    paramset_parser.add_argument("--step", default=None, help="Optional output STEP path")
+
     args = parser.parse_args()
 
     if args.command == "build":
@@ -45,6 +51,9 @@ def main():
     elif args.command == "assemble":
         from .assembler import assemble
         sys.exit(assemble(args.manifest, args.output, step_path=args.step))
+    elif args.command == "paramset":
+        from .paramset import paramset
+        sys.exit(paramset(args.code, args.params, args.output, step_path=args.step))
     else:
         parser.print_help()
         sys.exit(1)
