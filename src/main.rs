@@ -1031,7 +1031,8 @@ impl<'a> App<'a> {
                 self.conversation.add("system", "No sessions yet. Type a prompt to start building.");
             } else {
                 let mut session_info = String::from("Sessions:");
-                for sname in &project.sessions {
+                for si in &project.sessions {
+                    let sname = &si.name;
                     let session_path = project.path.join(sname);
                     let status = storage::session::session_status(&session_path);
                     let detail = match status {
@@ -1085,7 +1086,8 @@ impl<'a> App<'a> {
             if let Some(project) = self.projects.get(project_idx) {
                 let mut latest_stl: Option<PathBuf> = None;
                 // Check sessions in reverse (last = most recent)
-                for sname in project.sessions.iter().rev() {
+                for si in project.sessions.iter().rev() {
+                    let sname = &si.name;
                     let session_path = project.path.join(sname);
                     // Find highest iteration STL
                     if let Ok(entries) = std::fs::read_dir(&session_path) {
