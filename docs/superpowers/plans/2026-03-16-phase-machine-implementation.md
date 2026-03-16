@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-03-16-phase-machine-redesign.md`
 
+**Parallelization note:** Chunks 1 and 2 are independent (Rust vs. Python) and can be executed in parallel by separate agents.
+
 ---
 
 ## File Structure Overview
@@ -22,7 +24,8 @@
 | `src/component.rs` | Component state (pending/building/approved), per-component history, undo |
 | `src/assembly.rs` | Assembly manifest generation, progressive rebuild triggers |
 | `src/prompt_builder.rs` | Build phase-specific prompts with scoped context |
-| `src/tui/spec_panel.rs` | Right panel: live TOML spec preview |
+| `src/tui/spec_panel.rs` | Right panel: live TOML spec preview (Spec phase) |
+| `src/tui/component_tree.rs` | Right panel: component dependency tree visualization (Decompose phase) |
 | `src/tui/component_list.rs` | Left panel: component list with status badges |
 | `src/tui/param_editor.rs` | Right panel: editable parameter list for Refinement |
 | `prompts/spec.md` | Spec phase system prompt |
@@ -461,6 +464,17 @@ mod tests {
         assert_eq!(cs.iteration, 1);
         assert_eq!(cs.current_code.as_deref(), Some("code_v1"));
     }
+
+    #[test]
+    fn test_two_strikes() {
+        let mut cs = ComponentState::new("test", "Test");
+        assert!(!cs.two_strikes());
+        cs.record_error();
+        assert!(!cs.two_strikes());
+        cs.record_error();
+        assert!(cs.two_strikes());
+        assert_eq!(cs.status, ComponentStatus::Error);
+    }
 }
 ```
 
@@ -492,6 +506,8 @@ git commit -m "feat: add ComponentState with history, undo, and two-strikes trac
 ---
 
 ### Task 4: Create the prompt builder and system prompts
+
+**Important:** This task generalizes the prompt discovery mechanism. The existing `find_system_prompt()` in `claude.rs` only looks for `system.md`. The new `load_phase_system_prompt()` in `prompt_builder.rs` must use the same directory-walking logic but accept any filename. Task 24 (renaming system.md to legacy.md) and Task 18 (Spec phase using `send_with_prompt()`) both depend on this generalized mechanism being in place first.
 
 **Files:**
 - Create: `src/prompt_builder.rs`
@@ -742,9 +758,10 @@ git commit -m "feat: add paramset for zero-Claude parameter edits via namespace 
 
 ### Task 8: Add Rust-side Python subprocess wrappers for assemble and paramset
 
+**Note:** The existing codebase has no Rust-Python integration tests (only Python-side pytest and Rust-side unit tests). Full integration testing of the Rust→Python bridge for `assemble` and `paramset` is deferred to Task 27 (end-to-end manual test). The tests here verify function signatures and shared helper extraction.
+
 **Files:**
 - Modify: `src/python.rs`
-- Modify: `src/model_session.rs` (update `build()` call site)
 
 - [ ] **Step 1: Write tests for new subprocess wrappers**
 
@@ -761,9 +778,11 @@ Using the shared helper:
 - `paramset(python, code_path, params_path, output_path, step_path, timeout) -> BuildResult`
 - Add `step_path: Option<&Path>` to existing `build()` signature
 
-- [ ] **Step 4: Update call sites**
+- [ ] **Step 4: Keep backward-compatible build() wrapper**
 
-Update `model_session.rs` `build()` call to pass `None` for `step_path` (temporary — will be wired properly in Task 10).
+Instead of modifying `model_session.rs` call sites (which Task 10 will restructure entirely), keep the old `build()` function signature and have it delegate to the new one with `step_path: None`. This avoids changes that Task 10 will immediately obsolete.
+
+Note: STEP path construction (e.g., `components/<id>/<id>.step`) will be handled in Task 10 when `PhaseSession` takes over build orchestration.
 
 - [ ] **Step 5: Run full test suite**
 
@@ -773,7 +792,7 @@ Expected: PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/python.rs src/model_session.rs
+git add src/python.rs
 git commit -m "feat: add assemble/paramset Rust subprocess wrappers, STEP support in build()"
 ```
 
@@ -809,20 +828,32 @@ git commit -m "feat: add phase-aware session schema with per-component Claude se
 
 ### Task 10: Restructure model_session.rs for phases
 
+**Scope note:** This is a significant refactoring. Renaming `Session` to `LegacySession` will break references in `main.rs`, `storage/session.rs`, and `storage/project.rs`. The approach is: (a) create `PhaseSession` alongside existing `Session`, (b) migrate `App` to use `PhaseSession` in Task 17, (c) rename old `Session` to `LegacySession` at the end of this task once nothing depends on it directly.
+
 **Files:**
 - Modify: `src/model_session.rs`
 
 - [ ] **Step 1: Write tests for PhaseSession**
 
-Test `init_components()` creates dirs, `update_working_stl()` copies file, component dir paths.
+Test `init_components()` creates `components/<id>/`, `components/<id>/history/`, and `assembly/` directories. Test `update_working_stl()` copies file. Test `component_dir()` returns correct paths.
 
-- [ ] **Step 2: Implement PhaseSession**
+- [ ] **Step 2: Create PhaseSession alongside existing Session**
 
-Rename existing `Session` to `LegacySession`. Create `PhaseSession` with:
+Add `PhaseSession` to `src/model_session.rs` without renaming `Session` yet:
 - `base_dir`, `phase`, `spec`, `components`, `current_component_idx`, `conversations`, `claude_sessions`
-- `new(base_dir)`, `init_components(ids)`, `component_dir(id)`, `update_working_stl(src)`, `update_working_step(src)`, `save()`, `load(path)`
+- `new(base_dir)` — creates `components/` and `assembly/` directories
+- `init_components(ids)` — creates `components/<id>/` and `components/<id>/history/` for each component
+- `component_dir(id)` → `PathBuf`
+- `assembly_dir()` → `PathBuf` — returns `base_dir/assembly/`
+- `update_working_stl(src)` — atomic copy to `base_dir/working.stl`
+- `update_working_step(src)` — atomic copy to `base_dir/working.step`
+- `save()`, `load(path)`
 
-- [ ] **Step 3: Run tests, commit**
+- [ ] **Step 3: Rename Session to LegacySession**
+
+After `PhaseSession` is tested and working, rename the old `Session` struct to `LegacySession`. Keep it for read-only legacy session loading. Update any remaining references.
+
+- [ ] **Step 4: Run tests, commit**
 
 ```bash
 git add src/model_session.rs
@@ -862,15 +893,55 @@ git commit -m "feat: detect and display legacy sessions as read-only in project 
 - Create: `src/tui/spec_panel.rs`
 - Modify: `src/tui/mod.rs`
 
-- [ ] **Step 1: Write tests, implement SpecPanel**
+- [ ] **Step 1: Write failing test for SpecPanel**
 
-A scrollable panel that displays TOML text with a " Spec " title. Methods: `new()`, `set_content()`, `scroll_up/down()`, `render()`.
+Test `new()`, `set_content()`, `content()` accessor.
 
-- [ ] **Step 2: Run tests, commit**
+- [ ] **Step 2: Run test to verify failure**
+
+- [ ] **Step 3: Implement SpecPanel**
+
+A scrollable panel that displays TOML text with a " Spec " title. Methods: `new()`, `set_content()`, `content()`, `scroll_up/down()`, `render()`.
+
+- [ ] **Step 4: Run tests, commit**
 
 ```bash
 git add src/tui/spec_panel.rs src/tui/mod.rs
 git commit -m "feat: add spec preview panel for right-side TOML display"
+```
+
+---
+
+### Task 12b: Create the component tree panel (Decompose phase)
+
+**Files:**
+- Create: `src/tui/component_tree.rs`
+- Modify: `src/tui/mod.rs`
+
+The spec says the Decompose phase right panel shows "Component tree with deps" — a visual dependency tree, not raw TOML.
+
+- [ ] **Step 1: Write failing test**
+
+Test rendering of a component tree with dependencies showing arrows/indentation.
+
+- [ ] **Step 2: Implement ComponentTreePanel**
+
+Renders components as a tree with dependency arrows. Example:
+```
+  case_body (base)
+  ├── movement_cavity (subtract)
+  ├── rotor_pocket (subtract)
+  ├── stem_bore (subtract)
+  └── lug_pair (fuse)
+```
+
+Methods: `from_spec(spec)`, `render()`.
+
+- [ ] **Step 3: Run tests, commit**
+
+```bash
+git add src/tui/component_tree.rs src/tui/mod.rs
+git commit -m "feat: add component dependency tree panel for Decompose phase"
 ```
 
 ---
@@ -881,11 +952,17 @@ git commit -m "feat: add spec preview panel for right-side TOML display"
 - Create: `src/tui/component_list.rs`
 - Modify: `src/tui/mod.rs`
 
-- [ ] **Step 1: Write tests, implement ComponentListPanel**
+- [ ] **Step 1: Write failing tests**
+
+Test `from_components()`, `status_badge()` for each status (○/⋯/✓/✗), `select_next()`/`select_prev()`, `selected()`.
+
+- [ ] **Step 2: Run tests to verify failure**
+
+- [ ] **Step 3: Implement ComponentListPanel**
 
 List widget showing components with status badges: ○ pending, ⋯ building, ✓ approved, ✗ error. Keyboard navigation (j/k), active component highlight.
 
-- [ ] **Step 2: Run tests, commit**
+- [ ] **Step 4: Run tests, commit**
 
 ```bash
 git add src/tui/component_list.rs src/tui/mod.rs
@@ -900,11 +977,17 @@ git commit -m "feat: add component list panel with status badges and navigation"
 - Create: `src/tui/param_editor.rs`
 - Modify: `src/tui/mod.rs`
 
-- [ ] **Step 1: Write tests, implement ParamEditor**
+- [ ] **Step 1: Write failing tests**
+
+Test `new()` from param list, `set_value()`, `value()`, `changed_params()` returning only modified values.
+
+- [ ] **Step 2: Run tests to verify failure**
+
+- [ ] **Step 3: Implement ParamEditor**
 
 Table-like widget: name | value | unit. Value becomes editable text input in edit mode. Changed values highlighted. `changed_params()` returns overrides for paramset.
 
-- [ ] **Step 2: Run tests, commit**
+- [ ] **Step 4: Run tests, commit**
 
 ```bash
 git add src/tui/param_editor.rs src/tui/mod.rs
@@ -917,6 +1000,8 @@ git commit -m "feat: add parameter editor panel for zero-Claude refinement"
 
 ### Task 15: Make layout phase-aware
 
+**Dependencies:** Requires Task 1 (Phase enum).
+
 **Files:**
 - Modify: `src/tui/layout.rs`
 
@@ -924,7 +1009,8 @@ git commit -m "feat: add parameter editor panel for zero-Claude refinement"
 
 - [ ] **Step 2: Implement phase-specific panel assignments**
 
-- Spec/Decompose: left=project_tree, right=spec_panel
+- Spec: left=project_tree, right=spec_panel
+- Decompose: left=project_tree, right=component_tree
 - Component/Assembly/Refinement: left=component_list, right=model_panel or param_editor
 
 - [ ] **Step 3: Run tests, commit**
@@ -955,34 +1041,91 @@ git commit -m "feat: add phase indicator to status bar with progress display"
 
 ---
 
-### Task 17: Restructure main event loop for phase dispatch
+### Task 17a: Add phase and component state to App struct
+
+**Dependencies:** Requires Tasks 3, 10, 12, 13, 14, 15 to be complete. This is the integration point where all the foundation pieces come together.
 
 **Files:**
 - Modify: `src/main.rs`
 
-- [ ] **Step 1: Add phase + component state to App struct**
+- [ ] **Step 1: Add new fields to App struct**
 
-- [ ] **Step 2: Extract phase-specific key handlers**
+Add `phase: Phase`, `spec: Option<ModelSpec>`, `components: Vec<ComponentState>`, `current_component_idx: Option<usize>`, `spec_panel: SpecPanel`, `component_list: ComponentListPanel`, `param_editor: Option<ParamEditor>`.
 
-Create `handle_spec_keys()`, `handle_decompose_keys()`, `handle_component_keys()`, `handle_assembly_keys()`, `handle_refinement_keys()`.
+- [ ] **Step 2: Update App::new() to initialize new fields**
 
-- [ ] **Step 3: Wire Alt+1-5 for phase navigation**
+Default to `Phase::Spec`, empty components, None for current_component.
 
-- [ ] **Step 4: Wire Ctrl+Left/Right for component navigation**
+- [ ] **Step 3: Update App::render() to dispatch to correct panels per phase**
 
-- [ ] **Step 5: Add phase transition logic with confirmation**
+Use the phase-aware layout from Task 15. In Spec/Decompose: render spec_panel on right. In Component/Assembly/Refinement: render component_list on left, model_panel on right.
 
-Going backwards prompts confirmation. Going forward validates prerequisites.
+- [ ] **Step 4: Run cargo build**
 
-- [ ] **Step 6: Run cargo build + tests**
+Run: `cargo build`
+Expected: compiles
 
-Run: `cargo build && cargo test -q`
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/main.rs
-git commit -m "feat: restructure event loop with phase-specific dispatch and Alt+1-5 navigation"
+git commit -m "feat: add phase/component state to App struct with phase-aware rendering"
+```
+
+---
+
+### Task 17b: Extract phase-specific key handlers
+
+**Files:**
+- Modify: `src/main.rs`
+
+- [ ] **Step 1: Create handler method stubs**
+
+Create empty methods: `handle_spec_keys()`, `handle_decompose_keys()`, `handle_component_keys()`, `handle_assembly_keys()`, `handle_refinement_keys()`. Each returns `Option<Action>`.
+
+- [ ] **Step 2: Refactor event loop to dispatch by phase**
+
+In the main key event handler, dispatch to the phase-specific handler based on `self.phase`. Keep shared keybindings (Tab, Ctrl+C, etc.) in the main handler.
+
+- [ ] **Step 3: Run cargo build + tests**
+
+Run: `cargo build && cargo test -q`
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/main.rs
+git commit -m "refactor: extract phase-specific key handlers from monolithic event loop"
+```
+
+---
+
+### Task 17c: Wire phase navigation and transitions
+
+**Files:**
+- Modify: `src/main.rs`
+
+- [ ] **Step 1: Wire Alt+1-5 for phase navigation**
+
+- [ ] **Step 2: Wire Ctrl+Left/Right for component navigation**
+
+- [ ] **Step 3: Add phase transition logic with prerequisite validation**
+
+Going backwards prompts confirmation ("Switch back to Spec? Press Alt+1 again to confirm."). Going forward validates prerequisites (e.g., cannot advance from Spec without SPEC_COMPLETE, cannot advance from Decompose without approved component tree).
+
+- [ ] **Step 4: Write tests for prerequisite validation**
+
+Test that `can_advance_from_spec()` returns false when spec is incomplete, true when complete. Test that `can_advance_from_decompose()` requires non-empty component list.
+
+- [ ] **Step 5: Run cargo build + tests**
+
+Run: `cargo build && cargo test -q`
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/main.rs
+git commit -m "feat: wire Alt+1-5 phase navigation with prerequisite validation"
 ```
 
 ---
@@ -997,13 +1140,17 @@ git commit -m "feat: restructure event loop with phase-specific dispatch and Alt
 
 - [ ] **Step 1: Add `send_with_prompt()` to ClaudeClient**
 
-New method that sends a prompt with a specified system prompt file and optional session ID (not the default system.md).
+New method that sends a prompt with a specified system prompt file and optional session ID (not the default system.md). Uses `load_phase_system_prompt()` from `prompt_builder.rs` (Task 4) for the generalized prompt discovery.
 
-- [ ] **Step 2: Implement Spec phase in handle_spec_keys**
+- [ ] **Step 2: Add session expiry detection**
+
+In `send_with_prompt()`, if `--resume` is used and Claude returns an error indicating the session is expired/invalid, catch it and retry without `--resume` (fresh session). Log a warning to the user via the conversation pane: "Previous session expired, starting fresh."
+
+- [ ] **Step 3: Implement Spec phase in handle_spec_keys**
 
 User submits text → build prompt → send to Claude with spec.md → parse key-value responses → update spec panel → check for SPEC_COMPLETE → build ModelSpec → write spec.toml → transition to Decompose.
 
-- [ ] **Step 3: Manual test, commit**
+- [ ] **Step 4: Manual test, commit**
 
 ```bash
 git add src/main.rs src/claude.rs
@@ -1090,6 +1237,42 @@ git commit -m "feat: implement progressive assembly with manifest generation"
 
 ---
 
+### Task 21b: Implement standalone Assembly phase TUI mode
+
+**Files:**
+- Modify: `src/main.rs` (handle_assembly_keys)
+
+The spec defines Assembly as a distinct phase with its own TUI mode (left=component list, center=assembly log/conversation, right=full model metadata). This is separate from the automatic progressive assembly triggered by component approvals.
+
+- [ ] **Step 1: Implement handle_assembly_keys()**
+
+Assembly phase becomes active after all components are approved. The TUI shows:
+- Left: component list (all approved)
+- Center: assembly log showing build results, or conversation for structural changes
+- Right: full model metadata (dimensions, volume, watertight)
+
+User can:
+- Flag a fit issue (routes back to Component phase for that specific part)
+- Request structural changes to how parts connect (sends to Claude with assembly.md prompt)
+- Edit the assembly manifest directly (modify transforms)
+- Approve assembly to proceed to Refinement
+
+- [ ] **Step 2: Implement "route back to Component" flow**
+
+When user selects a component and presses a "fix" key:
+- Switch to Component phase
+- Set current_component to the flagged part
+- User can modify the component, approve, assembly re-triggers
+
+- [ ] **Step 3: Manual test, commit**
+
+```bash
+git add src/main.rs
+git commit -m "feat: implement standalone Assembly phase with fit-issue routing"
+```
+
+---
+
 ## Chunk 8: Refinement Phase + Viewer Updates
 
 ### Task 22: Implement Refinement phase
@@ -1138,9 +1321,20 @@ git commit -m "feat: update viewer for session-dir working files"
 - Rename: `prompts/system.md` → `prompts/legacy.md`
 - Modify: `src/claude.rs`
 
-- [ ] **Step 1: Rename and update references**
+- [ ] **Step 1: Rename file and update find_system_prompt()**
 
-- [ ] **Step 2: Commit**
+Rename `prompts/system.md` to `prompts/legacy.md`. Update `find_system_prompt()` in `claude.rs` to look for `legacy.md` instead of `system.md`. This function is now only used for legacy session support — phase-specific prompts use `load_phase_system_prompt()` from `prompt_builder.rs`.
+
+- [ ] **Step 2: Update test_system_prompt_found()**
+
+The test at `claude.rs` line ~293 asserts `find_system_prompt()` succeeds. Update it to look for `legacy.md` instead of `system.md`.
+
+- [ ] **Step 3: Run tests**
+
+Run: `cargo test -q`
+Expected: PASS
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add prompts/ src/claude.rs
@@ -1199,11 +1393,18 @@ git commit -m "feat: detect and recover from interrupted builds on session resum
 
 ### Task 27: Full end-to-end manual test
 
-- [ ] **Step 1: Test complete flow**
+- [ ] **Step 1: Verify existing Python subcommands still work**
+
+Run: `cd /home/mcr/Projects/AI3D && .venv-cadquery/bin/python -m pytest python/tests/ -v`
+Expected: ALL tests pass (including pre-existing test_builder, test_analyzer, test_validate, test_openscad).
+
+This ensures the refactoring of `builder.py` and `__main__.py` didn't break existing functionality.
+
+- [ ] **Step 2: Test complete TUI flow**
 
 Spec → Decompose → Component (all) → Assembly → Refinement (param + text) → Export → Quit → Resume.
 
-- [ ] **Step 2: Fix issues, commit**
+- [ ] **Step 3: Fix issues, commit**
 
 ```bash
 git add -A
