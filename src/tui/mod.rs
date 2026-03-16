@@ -6,6 +6,7 @@ pub mod model_panel;
 pub mod spec_panel;
 pub mod component_tree;
 pub mod component_list;
+pub mod param_editor;
 
 /// Focus state — which pane has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq)]
