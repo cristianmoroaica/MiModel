@@ -86,20 +86,9 @@ pub fn check_python(python: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn build(
-    python: &str,
-    code_path: &Path,
-    output_path: &Path,
-    engine: Engine,
-    timeout: Duration,
-) -> BuildResult {
+fn run_python_subprocess(python: &str, args: &[String], timeout: Duration) -> BuildResult {
     let mut child = match Command::new(python)
-        .args([
-            "-m", "ai3d_cad", "build",
-            "--code", &code_path.to_string_lossy(),
-            "--output", &output_path.to_string_lossy(),
-            "--engine", engine.as_str(),
-        ])
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -137,7 +126,8 @@ pub fn build(
                     match serde_json::from_str::<BuildError>(&stdout) {
                         Ok(err) => BuildResult::SyntaxError(err),
                         Err(_) => BuildResult::SyntaxError(BuildError {
-                            error: stdout, error_type: "syntax".to_string(),
+                            error: stdout,
+                            error_type: "syntax".to_string(),
                         }),
                     }
                 }
@@ -145,7 +135,8 @@ pub fn build(
                     match serde_json::from_str::<BuildError>(&stdout) {
                         Ok(err) => BuildResult::BuildError(err),
                         Err(_) => BuildResult::BuildError(BuildError {
-                            error: stdout, error_type: "build".to_string(),
+                            error: stdout,
+                            error_type: "build".to_string(),
                         }),
                     }
                 }
@@ -159,7 +150,9 @@ pub fn build(
                 let _ = child.kill();
             }
             #[cfg(not(unix))]
-            { let _ = child.kill(); }
+            {
+                let _ = child.kill();
+            }
             let _ = child.wait();
             BuildResult::Timeout
         }
@@ -171,6 +164,76 @@ pub fn build(
             })
         }
     }
+}
+
+pub fn build(
+    python: &str,
+    code_path: &Path,
+    output_path: &Path,
+    engine: Engine,
+    timeout: Duration,
+) -> BuildResult {
+    let args = vec![
+        "-m".to_string(),
+        "ai3d_cad".to_string(),
+        "build".to_string(),
+        "--code".to_string(),
+        code_path.to_string_lossy().into_owned(),
+        "--output".to_string(),
+        output_path.to_string_lossy().into_owned(),
+        "--engine".to_string(),
+        engine.as_str().to_string(),
+    ];
+    run_python_subprocess(python, &args, timeout)
+}
+
+pub fn assemble(
+    python: &str,
+    manifest_path: &Path,
+    output_path: &Path,
+    step_path: Option<&Path>,
+    timeout: Duration,
+) -> BuildResult {
+    let mut args = vec![
+        "-m".to_string(),
+        "ai3d_cad".to_string(),
+        "assemble".to_string(),
+        "--manifest".to_string(),
+        manifest_path.to_string_lossy().into_owned(),
+        "--output".to_string(),
+        output_path.to_string_lossy().into_owned(),
+    ];
+    if let Some(step) = step_path {
+        args.push("--step".to_string());
+        args.push(step.to_string_lossy().into_owned());
+    }
+    run_python_subprocess(python, &args, timeout)
+}
+
+pub fn paramset(
+    python: &str,
+    code_path: &Path,
+    params_path: &Path,
+    output_path: &Path,
+    step_path: Option<&Path>,
+    timeout: Duration,
+) -> BuildResult {
+    let mut args = vec![
+        "-m".to_string(),
+        "ai3d_cad".to_string(),
+        "paramset".to_string(),
+        "--code".to_string(),
+        code_path.to_string_lossy().into_owned(),
+        "--params".to_string(),
+        params_path.to_string_lossy().into_owned(),
+        "--output".to_string(),
+        output_path.to_string_lossy().into_owned(),
+    ];
+    if let Some(step) = step_path {
+        args.push("--step".to_string());
+        args.push(step.to_string_lossy().into_owned());
+    }
+    run_python_subprocess(python, &args, timeout)
 }
 
 #[cfg(test)]
