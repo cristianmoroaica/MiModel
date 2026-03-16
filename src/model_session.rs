@@ -1,11 +1,20 @@
 //! Session manager — conversation, iterations, undo, temp files.
 
 use crate::claude::Message;
+use crate::component::ComponentState;
+use crate::phase::Phase;
 use crate::python::{self, BuildResult, Engine, ModelMetadata};
+use crate::spec::ModelSpec;
+use crate::storage::session::{ClaudeSessionMap, ConversationEntry, PhaseSessionData};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+// ---------------------------------------------------------------------------
+// LegacySession (was "Session") — flat iteration-based model
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionState {
@@ -23,7 +32,7 @@ struct Snapshot {
     engine: Option<Engine>,
 }
 
-pub struct Session {
+pub struct LegacySession {
     pub state: SessionState,
     pub messages: Vec<Message>,
     pub current_metadata: Option<ModelMetadata>,
@@ -36,14 +45,14 @@ pub struct Session {
     python_path: String,
 }
 
-impl Session {
+impl LegacySession {
     pub fn new(build_timeout: u64, python_path: String) -> Self {
         #[allow(deprecated)]
         let temp_dir = tempfile::tempdir()
             .expect("Failed to create temp directory")
             .into_path();
 
-        Session {
+        LegacySession {
             state: SessionState::Idle,
             messages: Vec::new(),
             current_metadata: None,
@@ -175,7 +184,7 @@ impl Session {
     pub fn iteration(&self) -> u32 { self.iteration }
 }
 
-/// Data that gets serialized to session.json.
+/// Data that gets serialized to session.json (legacy format).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
     pub name: String,
@@ -188,7 +197,7 @@ pub struct SessionData {
     pub conversation: Vec<Message>,
 }
 
-impl Session {
+impl LegacySession {
     /// Save current session state to a directory.
     /// Copies all iteration files (code, STL, metadata) and writes session.json.
     pub fn save_to(&self, dir: &Path, name: &str, claude_session_id: Option<&str>) -> Result<(), String> {
@@ -238,7 +247,7 @@ impl Session {
         let data: SessionData = serde_json::from_str(&json)
             .map_err(|e| format!("Failed to parse session.json: {e}"))?;
 
-        let mut session = Session::new(build_timeout, python_path);
+        let mut session = LegacySession::new(build_timeout, python_path);
         session.messages = data.conversation;
         session.iteration = data.current_iteration;
 
@@ -289,19 +298,195 @@ impl Session {
     }
 }
 
-impl Drop for Session {
+impl Drop for LegacySession {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.temp_dir);
     }
 }
 
+// Compatibility alias — will be removed when main.rs migrates to PhaseSession
+pub type Session = LegacySession;
+
+// ---------------------------------------------------------------------------
+// PhaseSession — phase-machine session with per-component directories
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct PhaseSession {
+    pub base_dir: PathBuf,
+    pub phase: Phase,
+    pub spec: Option<ModelSpec>,
+    pub components: Vec<ComponentState>,
+    pub current_component_idx: Option<usize>,
+    pub conversations: HashMap<String, Vec<ConversationEntry>>,
+    pub claude_sessions: ClaudeSessionMap,
+    pub build_timeout: Duration,
+    pub python_path: String,
+}
+
+impl PhaseSession {
+    /// Create a new phase session, setting up base_dir, components/, and assembly/ directories.
+    pub fn new(base_dir: PathBuf, build_timeout: u64, python_path: String) -> Self {
+        fs::create_dir_all(base_dir.join("components"))
+            .expect("Failed to create components directory");
+        fs::create_dir_all(base_dir.join("assembly"))
+            .expect("Failed to create assembly directory");
+
+        PhaseSession {
+            base_dir,
+            phase: Phase::Spec,
+            spec: None,
+            components: Vec::new(),
+            current_component_idx: None,
+            conversations: HashMap::new(),
+            claude_sessions: ClaudeSessionMap::default(),
+            build_timeout: Duration::from_secs(build_timeout),
+            python_path,
+        }
+    }
+
+    /// Initialize component directories and populate self.components.
+    /// Each entry in `ids_and_names` is `(id, display_name)`.
+    pub fn init_components(&mut self, ids_and_names: &[(&str, &str)]) -> Result<(), String> {
+        self.components.clear();
+
+        for &(id, name) in ids_and_names {
+            let comp_dir = self.base_dir.join("components").join(id);
+            let hist_dir = comp_dir.join("history");
+            fs::create_dir_all(&hist_dir)
+                .map_err(|e| format!("Failed to create component dir {}: {e}", id))?;
+
+            let mut cs = ComponentState::new(id, name);
+            cs.set_dir(comp_dir);
+            self.components.push(cs);
+        }
+
+        Ok(())
+    }
+
+    /// Return the directory for a given component id.
+    pub fn component_dir(&self, id: &str) -> PathBuf {
+        self.base_dir.join("components").join(id)
+    }
+
+    /// Return the assembly directory.
+    pub fn assembly_dir(&self) -> PathBuf {
+        self.base_dir.join("assembly")
+    }
+
+    /// Atomic copy: write to working.stl.tmp then rename to working.stl.
+    pub fn update_working_stl(&self, src: &Path) -> Result<(), String> {
+        let tmp = self.base_dir.join("working.stl.tmp");
+        let dest = self.base_dir.join("working.stl");
+        fs::copy(src, &tmp)
+            .map_err(|e| format!("Failed to copy STL to tmp: {e}"))?;
+        fs::rename(&tmp, &dest)
+            .map_err(|e| format!("Failed to rename working.stl.tmp: {e}"))?;
+        Ok(())
+    }
+
+    /// Atomic copy: write to working.step.tmp then rename to working.step.
+    pub fn update_working_step(&self, src: &Path) -> Result<(), String> {
+        let tmp = self.base_dir.join("working.step.tmp");
+        let dest = self.base_dir.join("working.step");
+        fs::copy(src, &tmp)
+            .map_err(|e| format!("Failed to copy STEP to tmp: {e}"))?;
+        fs::rename(&tmp, &dest)
+            .map_err(|e| format!("Failed to rename working.step.tmp: {e}"))?;
+        Ok(())
+    }
+
+    /// Save session state to session.json (PhaseSessionData format) and spec.toml if spec exists.
+    pub fn save(&self) -> Result<(), String> {
+        let current_component = self.current_component_idx
+            .and_then(|i| self.components.get(i))
+            .map(|c| c.id.clone());
+
+        let data = PhaseSessionData {
+            name: self.base_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unnamed".to_string()),
+            created: chrono::Utc::now().to_rfc3339(),
+            phase: self.phase,
+            current_component,
+            claude_sessions: self.claude_sessions.clone(),
+            conversations: self.conversations.clone(),
+            component_states: self.components.clone(),
+        };
+
+        let json = serde_json::to_string_pretty(&data)
+            .map_err(|e| format!("Failed to serialize session: {e}"))?;
+        fs::write(self.base_dir.join("session.json"), json)
+            .map_err(|e| format!("Failed to write session.json: {e}"))?;
+
+        if let Some(spec) = &self.spec {
+            spec.save(&self.base_dir.join("spec.toml"))?;
+        }
+
+        Ok(())
+    }
+
+    /// Load a PhaseSession from an existing directory.
+    /// Detects legacy vs new format; returns an error for legacy sessions.
+    pub fn load(dir: &Path, build_timeout: u64, python_path: String) -> Result<Self, String> {
+        let json_path = dir.join("session.json");
+        let json_str = fs::read_to_string(&json_path)
+            .map_err(|e| format!("Failed to read session.json: {e}"))?;
+
+        if crate::storage::session::is_legacy_session_json(&json_str) {
+            return Err("Legacy session format detected; use LegacySession::load_from instead".to_string());
+        }
+
+        let data: PhaseSessionData = serde_json::from_str(&json_str)
+            .map_err(|e| format!("Failed to parse session.json: {e}"))?;
+
+        // Reconstruct component dirs from on-disk directories
+        let mut components = data.component_states;
+        for cs in &mut components {
+            let comp_dir = dir.join("components").join(&cs.id);
+            cs.set_dir(comp_dir);
+        }
+
+        let current_component_idx = data.current_component.and_then(|ref id| {
+            components.iter().position(|c| c.id == *id)
+        });
+
+        // Load spec if it exists
+        let spec_path = dir.join("spec.toml");
+        let spec = if spec_path.exists() {
+            Some(ModelSpec::load(&spec_path)?)
+        } else {
+            None
+        };
+
+        Ok(PhaseSession {
+            base_dir: dir.to_path_buf(),
+            phase: data.phase,
+            spec,
+            components,
+            current_component_idx,
+            conversations: data.conversations,
+            claude_sessions: data.claude_sessions,
+            build_timeout: Duration::from_secs(build_timeout),
+            python_path,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // ---- LegacySession tests ----
+
     #[test]
     fn test_new_session() {
-        let s = Session::new(60, "python".to_string());
+        let s = LegacySession::new(60, "python".to_string());
         assert_eq!(s.state, SessionState::Idle);
         assert!(s.messages.is_empty());
         assert!(s.temp_dir.exists());
@@ -309,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_add_messages() {
-        let mut s = Session::new(60, "python".to_string());
+        let mut s = LegacySession::new(60, "python".to_string());
         s.add_user_message("make a box");
         s.add_assistant_message("here's a box");
         assert_eq!(s.messages.len(), 2);
@@ -318,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_reset() {
-        let mut s = Session::new(60, "python".to_string());
+        let mut s = LegacySession::new(60, "python".to_string());
         s.add_user_message("make a box");
         s.reset();
         assert!(s.messages.is_empty());
@@ -330,7 +515,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let session_dir = tmp.path().join("test_session");
 
-        let mut s = Session::new(60, "python".to_string());
+        let mut s = LegacySession::new(60, "python".to_string());
         s.add_user_message("make a box");
         s.add_assistant_message("here's a box");
 
@@ -343,5 +528,176 @@ mod tests {
         assert_eq!(data.name, "test_session");
         assert_eq!(data.claude_session_id, Some("sid-123".to_string()));
         assert_eq!(data.conversation.len(), 2);
+    }
+
+    // ---- PhaseSession tests ----
+
+    #[test]
+    fn test_phase_session_creates_dirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _session = PhaseSession::new(
+            tmp.path().join("my_session"),
+            60,
+            "python".to_string(),
+        );
+        assert!(tmp.path().join("my_session/components").is_dir());
+        assert!(tmp.path().join("my_session/assembly").is_dir());
+    }
+
+    #[test]
+    fn test_init_components() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut session = PhaseSession::new(
+            tmp.path().join("sess"),
+            60,
+            "python".to_string(),
+        );
+        session.init_components(&[("body", "Case Body"), ("cavity", "Cavity")]).unwrap();
+        assert!(tmp.path().join("sess/components/body").is_dir());
+        assert!(tmp.path().join("sess/components/body/history").is_dir());
+        assert!(tmp.path().join("sess/components/cavity").is_dir());
+        assert_eq!(session.components.len(), 2);
+        assert_eq!(session.components[0].id, "body");
+    }
+
+    #[test]
+    fn test_component_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let session = PhaseSession::new(
+            tmp.path().join("sess"),
+            60,
+            "python".to_string(),
+        );
+        assert_eq!(
+            session.component_dir("body"),
+            tmp.path().join("sess/components/body"),
+        );
+    }
+
+    #[test]
+    fn test_assembly_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let session = PhaseSession::new(
+            tmp.path().join("sess"),
+            60,
+            "python".to_string(),
+        );
+        assert_eq!(
+            session.assembly_dir(),
+            tmp.path().join("sess/assembly"),
+        );
+    }
+
+    #[test]
+    fn test_update_working_stl() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let session = PhaseSession::new(
+            tmp.path().join("sess"),
+            60,
+            "python".to_string(),
+        );
+        // Create a dummy STL
+        let src = tmp.path().join("test.stl");
+        std::fs::write(&src, b"dummy stl").unwrap();
+        session.update_working_stl(&src).unwrap();
+        assert!(tmp.path().join("sess/working.stl").exists());
+        assert_eq!(std::fs::read(tmp.path().join("sess/working.stl")).unwrap(), b"dummy stl");
+    }
+
+    #[test]
+    fn test_update_working_step() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let session = PhaseSession::new(
+            tmp.path().join("sess"),
+            60,
+            "python".to_string(),
+        );
+        let src = tmp.path().join("test.step");
+        std::fs::write(&src, b"dummy step").unwrap();
+        session.update_working_step(&src).unwrap();
+        assert!(tmp.path().join("sess/working.step").exists());
+        assert_eq!(std::fs::read(tmp.path().join("sess/working.step")).unwrap(), b"dummy step");
+    }
+
+    #[test]
+    fn test_save_and_load() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut session = PhaseSession::new(
+            tmp.path().join("sess"),
+            60,
+            "python".to_string(),
+        );
+        session.phase = Phase::Decompose;
+        session.init_components(&[("body", "Body")]).unwrap();
+        session.save().unwrap();
+
+        assert!(tmp.path().join("sess/session.json").exists());
+
+        let loaded = PhaseSession::load(
+            &tmp.path().join("sess"),
+            60,
+            "python".to_string(),
+        ).unwrap();
+        assert_eq!(loaded.phase, Phase::Decompose);
+        assert_eq!(loaded.components.len(), 1);
+        assert_eq!(loaded.components[0].id, "body");
+    }
+
+    #[test]
+    fn test_load_rejects_legacy_format() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let session_dir = tmp.path().join("legacy_sess");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        // Write a legacy-format session.json
+        let legacy_json = r#"{
+            "name": "old",
+            "created": "2026-03-15T00:00:00Z",
+            "modified": "2026-03-15T00:00:00Z",
+            "iteration_count": 3,
+            "claude_session_id": null,
+            "current_iteration": 3,
+            "engine": null,
+            "conversation": []
+        }"#;
+        std::fs::write(session_dir.join("session.json"), legacy_json).unwrap();
+
+        let result = PhaseSession::load(&session_dir, 60, "python".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Legacy"));
+    }
+
+    #[test]
+    fn test_save_with_spec() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut session = PhaseSession::new(
+            tmp.path().join("sess"),
+            60,
+            "python".to_string(),
+        );
+        session.spec = Some(ModelSpec {
+            model: crate::spec::Model {
+                name: "Test Model".to_string(),
+                purpose: "testing".to_string(),
+                units: "mm".to_string(),
+                print_method: "FDM".to_string(),
+                envelope: crate::spec::Envelope { max_x: 100.0, max_y: 100.0, max_z: 50.0 },
+                features: crate::spec::ItemList { items: vec![] },
+                constraints: crate::spec::ItemList { items: vec![] },
+            },
+            components: vec![],
+            assembly: None,
+        });
+        session.save().unwrap();
+        assert!(tmp.path().join("sess/spec.toml").exists());
+
+        // Reload and verify spec is restored
+        let loaded = PhaseSession::load(
+            &tmp.path().join("sess"),
+            60,
+            "python".to_string(),
+        ).unwrap();
+        assert!(loaded.spec.is_some());
+        assert_eq!(loaded.spec.unwrap().model.name, "Test Model");
     }
 }
