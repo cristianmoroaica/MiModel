@@ -201,7 +201,7 @@ impl<'a> App<'a> {
         let bar_area = panes.input_bar;
         let input_focused = self.focus == Focus::Input;
         if !self.pending_images.is_empty() {
-            self.input_bar.set_badge(&format!("[{} image(s)]", self.pending_images.len()));
+            self.input_bar.set_badge(&format!("[{} file(s)]", self.pending_images.len()));
         } else {
             self.input_bar.set_badge("");
         }
@@ -670,8 +670,8 @@ impl<'a> App<'a> {
             }
         }
 
-        // Extract image paths from text
-        let (clean_text, mut extracted_images) = image::extract_image_paths(&text);
+        // Extract attachment paths (images + PDFs) from text
+        let (clean_text, mut extracted_images) = image::extract_attachment_paths(&text);
         extracted_images.extend(self.pending_images.drain(..));
         let all_images = extracted_images;
 

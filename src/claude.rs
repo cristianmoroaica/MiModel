@@ -121,17 +121,17 @@ pub fn send_prompt(
     prompt: &str,
     image_paths: &[PathBuf],
 ) -> Result<(String, Option<String>), String> {
-    // Build the full prompt — if images are attached, tell claude about them
+    // Build the full prompt — if files are attached, tell claude about them
     let full_prompt = if image_paths.is_empty() {
         prompt.to_string()
     } else {
-        let image_refs: Vec<String> = image_paths.iter()
-            .map(|p| format!("Image: {}", p.to_string_lossy()))
+        let file_refs: Vec<String> = image_paths.iter()
+            .map(|p| crate::image::describe_attachment(p))
             .collect();
         format!(
-            "{}\n\n{}\n\nPlease read and analyze the image(s) above using the Read tool, then generate the CadQuery code.",
+            "{}\n\n{}\n\nPlease read and analyze the attached file(s) using the Read tool, then generate the CadQuery code.",
             prompt,
-            image_refs.join("\n")
+            file_refs.join("\n")
         )
     };
 

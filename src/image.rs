@@ -1,14 +1,41 @@
-//! Image handling — clipboard paste and file path detection.
+//! File attachment handling — clipboard paste, drag-and-drop path detection.
+//! Supports images (png, jpg, etc.) and PDFs.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"];
+const DOC_EXTENSIONS: &[&str] = &["pdf"];
+
+/// All supported attachment extensions.
+fn is_attachment_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let lower = e.to_lowercase();
+            IMAGE_EXTENSIONS.contains(&lower.as_str()) || DOC_EXTENSIONS.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
+}
+
+/// Check if a path is an image (not PDF).
+pub fn is_image(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Check if a path is a PDF.
+pub fn is_pdf(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase() == "pdf")
+        .unwrap_or(false)
+}
 
 /// Grab image from Wayland clipboard via wl-paste.
-/// Saves to the given path and returns true if an image was found.
 pub fn paste_clipboard_image(dest: &Path) -> Result<(), String> {
-    // Check if clipboard has image data
     let types = Command::new("wl-paste")
         .arg("--list-types")
         .stdout(Stdio::piped())
@@ -23,13 +50,11 @@ pub fn paste_clipboard_image(dest: &Path) -> Result<(), String> {
         return Err("No image in clipboard. Copy an image first.".to_string());
     }
 
-    // Determine the best image type
     let mime = if types_str.lines().any(|t| t == "image/png") {
         "image/png"
     } else if types_str.lines().any(|t| t == "image/jpeg") {
         "image/jpeg"
     } else {
-        // Take whatever image type is available
         types_str
             .lines()
             .find(|t| t.starts_with("image/"))
@@ -57,43 +82,111 @@ pub fn paste_clipboard_image(dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Extract image file paths from user input text.
-/// Returns (cleaned text without paths, list of image paths found).
-pub fn extract_image_paths(input: &str) -> (String, Vec<PathBuf>) {
-    let mut images = Vec::new();
+/// Extract file attachment paths from user input text.
+/// Handles:
+///   - Quoted paths: "path with spaces.pdf"
+///   - Single-quoted paths: 'path with spaces.pdf'
+///   - Escaped spaces: path\ with\ spaces.pdf
+///   - Simple paths: /home/user/file.png
+///   - ~ expansion: ~/docs/file.pdf
+///
+/// Returns (cleaned text without paths, list of attachment paths found).
+pub fn extract_attachment_paths(input: &str) -> (String, Vec<PathBuf>) {
+    let mut attachments = Vec::new();
     let mut text_parts = Vec::new();
+    let mut chars = input.chars().peekable();
+    let mut current_token = String::new();
 
-    for word in input.split_whitespace() {
-        // Expand ~ to home directory
-        let expanded = if word.starts_with("~/") {
-            if let Some(home) = dirs::home_dir() {
-                home.join(&word[2..]).to_string_lossy().to_string()
-            } else {
-                word.to_string()
+    while let Some(&ch) = chars.peek() {
+        match ch {
+            // Quoted path: "..." or '...'
+            '"' | '\'' => {
+                let quote = ch;
+                chars.next(); // consume opening quote
+                let mut path_str = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == quote { chars.next(); break; }
+                    path_str.push(c);
+                    chars.next();
+                }
+                let expanded = expand_path(&path_str);
+                if Path::new(&expanded).exists() && is_attachment_path(Path::new(&expanded)) {
+                    // Flush any pending text
+                    if !current_token.is_empty() {
+                        text_parts.push(std::mem::take(&mut current_token));
+                    }
+                    attachments.push(PathBuf::from(expanded));
+                } else {
+                    current_token.push_str(&path_str);
+                }
             }
-        } else {
-            word.to_string()
-        };
-
-        let path = Path::new(&expanded);
-        if path.exists() && is_image_path(path) {
-            images.push(path.to_path_buf());
-        } else if is_image_path(Path::new(word)) && Path::new(&expanded).exists() {
-            images.push(PathBuf::from(&expanded));
-        } else {
-            text_parts.push(word);
+            // Whitespace: end of token
+            ' ' | '\t' => {
+                chars.next();
+                if !current_token.is_empty() {
+                    let expanded = expand_path(&current_token);
+                    if Path::new(&expanded).exists() && is_attachment_path(Path::new(&expanded)) {
+                        attachments.push(PathBuf::from(expanded));
+                    } else {
+                        text_parts.push(std::mem::take(&mut current_token));
+                    }
+                    current_token.clear();
+                }
+            }
+            // Escaped space: \ followed by space
+            '\\' => {
+                chars.next();
+                if let Some(&next) = chars.peek() {
+                    if next == ' ' {
+                        current_token.push(' ');
+                        chars.next();
+                    } else {
+                        current_token.push('\\');
+                    }
+                }
+            }
+            _ => {
+                current_token.push(ch);
+                chars.next();
+            }
         }
     }
 
-    (text_parts.join(" "), images)
+    // Handle last token
+    if !current_token.is_empty() {
+        let expanded = expand_path(&current_token);
+        if Path::new(&expanded).exists() && is_attachment_path(Path::new(&expanded)) {
+            attachments.push(PathBuf::from(expanded));
+        } else {
+            text_parts.push(current_token);
+        }
+    }
+
+    (text_parts.join(" "), attachments)
 }
 
-/// Check if a path looks like an image file (by extension).
-fn is_image_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
-        .unwrap_or(false)
+/// Legacy alias for backward compatibility.
+pub fn extract_image_paths(input: &str) -> (String, Vec<PathBuf>) {
+    extract_attachment_paths(input)
+}
+
+/// Expand ~ to home directory.
+fn expand_path(path: &str) -> String {
+    if path.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(&path[2..]).to_string_lossy().to_string();
+        }
+    }
+    path.to_string()
+}
+
+/// Describe an attachment for the Claude prompt.
+pub fn describe_attachment(path: &Path) -> String {
+    if is_pdf(path) {
+        format!("PDF document: {}", path.to_string_lossy())
+    } else {
+        format!("Image: {}", path.to_string_lossy())
+    }
 }
 
 #[cfg(test)]
@@ -101,18 +194,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_image_path() {
-        assert!(is_image_path(Path::new("photo.png")));
-        assert!(is_image_path(Path::new("photo.JPG")));
-        assert!(is_image_path(Path::new("/tmp/sketch.jpeg")));
-        assert!(!is_image_path(Path::new("model.stl")));
-        assert!(!is_image_path(Path::new("code.py")));
+    fn test_is_attachment_path() {
+        assert!(is_attachment_path(Path::new("photo.png")));
+        assert!(is_attachment_path(Path::new("photo.JPG")));
+        assert!(is_attachment_path(Path::new("document.pdf")));
+        assert!(is_attachment_path(Path::new("document.PDF")));
+        assert!(!is_attachment_path(Path::new("model.stl")));
+        assert!(!is_attachment_path(Path::new("code.py")));
     }
 
     #[test]
-    fn test_extract_no_images() {
-        let (text, images) = extract_image_paths("make a 10mm cube");
+    fn test_extract_no_attachments() {
+        let (text, files) = extract_attachment_paths("make a 10mm cube");
         assert_eq!(text, "make a 10mm cube");
-        assert!(images.is_empty());
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_is_pdf() {
+        assert!(is_pdf(Path::new("datasheet.pdf")));
+        assert!(is_pdf(Path::new("SPECS.PDF")));
+        assert!(!is_pdf(Path::new("photo.png")));
+    }
+
+    #[test]
+    fn test_describe_attachment() {
+        assert!(describe_attachment(Path::new("foo.pdf")).starts_with("PDF document:"));
+        assert!(describe_attachment(Path::new("bar.png")).starts_with("Image:"));
     }
 }
