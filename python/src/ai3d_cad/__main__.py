@@ -26,6 +26,11 @@ def main():
     val_parser.add_argument("--code", required=True, help="Path to .py or .scad file")
     val_parser.add_argument("--engine", choices=["cadquery", "openscad"], default="cadquery")
 
+    assemble_parser = subparsers.add_parser("assemble", help="Assemble components from a manifest")
+    assemble_parser.add_argument("--manifest", required=True, help="Path to assembly manifest JSON")
+    assemble_parser.add_argument("--output", required=True, help="Output STL path")
+    assemble_parser.add_argument("--step", default=None, help="Optional output STEP path")
+
     args = parser.parse_args()
 
     if args.command == "build":
@@ -37,6 +42,9 @@ def main():
     elif args.command == "validate":
         from .builder import validate
         sys.exit(validate(args.code, args.engine))
+    elif args.command == "assemble":
+        from .assembler import assemble
+        sys.exit(assemble(args.manifest, args.output, step_path=args.step))
     else:
         parser.print_help()
         sys.exit(1)
