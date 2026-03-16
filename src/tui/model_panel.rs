@@ -1,38 +1,28 @@
-//! Model panel pane — dimensions, features, braille preview, metadata.
+//! Model panel pane — dimensions, features, metadata, pending files.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::python::ModelMetadata;
-use crate::preview::{render_braille, ViewAngle};
-use crate::stl::StlMesh;
+use std::path::PathBuf;
 
 pub struct ModelPanel {
     pub metadata: Option<ModelMetadata>,
-    pub preview_text: Option<String>,
     pub iteration: u32,
+    pub pending_files: Vec<PathBuf>,
 }
 
 impl ModelPanel {
     pub fn new() -> Self {
-        Self { metadata: None, preview_text: None, iteration: 0 }
+        Self { metadata: None, iteration: 0, pending_files: Vec::new() }
     }
 
-    /// Update with new build results.
-    pub fn update(&mut self, metadata: &ModelMetadata, stl_path: Option<&std::path::Path>, iteration: u32) {
+    pub fn update(&mut self, metadata: &ModelMetadata, _stl_path: Option<&std::path::Path>, iteration: u32) {
         self.metadata = Some(metadata.clone());
         self.iteration = iteration;
-
-        // Generate braille preview if STL is available
-        if let Some(path) = stl_path {
-            if let Ok(mesh) = StlMesh::from_file(path) {
-                self.preview_text = Some(render_braille(&mesh, ViewAngle::Front, 20));
-            }
-        }
     }
 
     pub fn clear(&mut self) {
         self.metadata = None;
-        self.preview_text = None;
         self.iteration = 0;
     }
 
@@ -59,14 +49,6 @@ impl ModelPanel {
                 lines.push(Line::raw(""));
             }
 
-            if let Some(ref preview) = self.preview_text {
-                lines.push(Line::from(Span::styled("Preview:", Style::default().fg(Color::DarkGray))));
-                for line in preview.lines() {
-                    lines.push(Line::raw(format!(" {line}")));
-                }
-                lines.push(Line::raw(""));
-            }
-
             lines.push(Line::from(vec![
                 Span::styled("Iterations: ", Style::default().fg(Color::DarkGray)),
                 Span::raw(self.iteration.to_string()),
@@ -85,6 +67,31 @@ impl ModelPanel {
         } else {
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled("No model yet", Style::default().fg(Color::DarkGray))));
+        }
+
+        // Show pending attachments
+        if !self.pending_files.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled("Attached:", Style::default().fg(Color::Cyan))));
+            for (i, path) in self.pending_files.iter().enumerate() {
+                let name = path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string_lossy().to_string());
+                // Truncate long names
+                let display = if name.len() > 20 {
+                    format!("{}...", &name[..17])
+                } else {
+                    name
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {}. ", i + 1), Style::default().fg(Color::DarkGray)),
+                    Span::raw(display),
+                ]));
+            }
+            lines.push(Line::from(Span::styled(
+                "  Ctrl+X clear all",
+                Style::default().fg(Color::DarkGray),
+            )));
         }
 
         let paragraph = Paragraph::new(Text::from(lines)).block(block);

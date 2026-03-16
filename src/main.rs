@@ -374,6 +374,16 @@ impl<'a> App<'a> {
                 }
                 return;
             }
+            (Char('x'), KeyModifiers::CONTROL) => {
+                // Clear all pending attachments
+                if !self.pending_images.is_empty() {
+                    let count = self.pending_images.len();
+                    self.pending_images.clear();
+                    self.model_panel.pending_files.clear();
+                    self.conversation.add("system", &format!("Cleared {count} pending file(s)."));
+                }
+                return;
+            }
             (Char('w'), KeyModifiers::CONTROL) => {
                 // Save current model as a named part
                 if self.session.latest_stl_path().is_some() {
@@ -403,6 +413,7 @@ impl<'a> App<'a> {
                     Ok(()) => {
                         let size_kb = std::fs::metadata(&dest).map(|m| m.len() / 1024).unwrap_or(0);
                         self.conversation.add("system", &format!("Attached image ({size_kb}KB)"));
+                        self.model_panel.pending_files.push(dest.clone());
                         self.pending_images.push(dest);
                     }
                     Err(e) => {
@@ -578,6 +589,49 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Handle pasted text (from bracketed paste / drag-and-drop).
+    /// Detects file paths and attaches them; inserts remaining text into input.
+    fn handle_paste(&mut self, pasted: String) {
+        let mut remaining_text = Vec::new();
+
+        for raw_line in pasted.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() { continue; }
+
+            // Try to resolve as a file path
+            let path_str = if let Some(stripped) = line.strip_prefix("file://") {
+                // Decode percent-encoded URI
+                percent_decode(stripped)
+            } else {
+                line.to_string()
+            };
+            let expanded = image::expand_tilde(&path_str);
+            let path = std::path::Path::new(&expanded);
+
+            if path.exists() && (image::is_image(path) || image::is_pdf(path)) {
+                let kind = if image::is_pdf(path) { "PDF" } else { "image" };
+                let size_kb = std::fs::metadata(path).map(|m| m.len() / 1024).unwrap_or(0);
+                self.conversation.add("system", &format!("Attached {kind} ({size_kb}KB): {}", path.display()));
+                self.pending_images.push(path.to_path_buf());
+            } else {
+                remaining_text.push(raw_line);
+            }
+        }
+
+        // Insert any non-file text into the input bar
+        if !remaining_text.is_empty() {
+            let text = remaining_text.join("\n");
+            for ch in text.chars() {
+                self.input_bar.textarea.input(tui_textarea::Input {
+                    key: tui_textarea::Key::Char(ch),
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                });
+            }
+        }
+    }
+
     fn submit_prompt(&mut self, text: String) {
         if self.busy != BusyState::Idle {
             self.conversation.add("system", "Please wait for the current operation to finish.");
@@ -728,6 +782,7 @@ impl<'a> App<'a> {
         // Extract attachment paths (images + PDFs) from text
         let (clean_text, mut extracted_images) = image::extract_attachment_paths(&text);
         extracted_images.extend(self.pending_images.drain(..));
+        self.model_panel.pending_files.clear();
         let all_images = extracted_images;
 
         // Add user message to conversation
@@ -1013,6 +1068,26 @@ impl<'a> App<'a> {
     }
 }
 
+/// Decode percent-encoded URI path (e.g. %20 -> space).
+fn percent_decode(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                result.push(byte as char);
+            } else {
+                result.push('%');
+                result.push_str(&hex);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 fn find_system_prompt() -> Result<std::path::PathBuf, String> {
     let starts: Vec<std::path::PathBuf> = [
         std::env::current_dir().ok(),
@@ -1119,11 +1194,17 @@ fn main() {
     // Initialize ratatui terminal
     let mut terminal = ratatui::init();
 
+    // Enable bracketed paste for drag-and-drop file detection
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
+
     // Run event loop
     let result = run_event_loop(&mut terminal, &mut app);
 
     // Kill any running Claude subprocess before exiting
     app.cleanup();
+
+    // Disable bracketed paste before restoring terminal
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
 
     // Restore terminal
     ratatui::restore();
@@ -1159,10 +1240,14 @@ fn run_event_loop(
 
         // Poll for events with 50ms timeout
         if crossterm::event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     app.handle_key(key);
                 }
+                Event::Paste(text) => {
+                    app.handle_paste(text);
+                }
+                _ => {}
             }
         }
 

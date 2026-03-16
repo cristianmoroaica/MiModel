@@ -29,12 +29,12 @@ pub fn compute_layout(area: Rect, config: &LayoutConfig) -> PaneAreas {
     let show_sidebar = config.show_sidebar && width >= 100;
     let show_model = config.show_model_panel && width >= 60;
 
-    // Split vertically: main area + input bar (3 lines) + legend (1 line)
+    // Split vertically: main area + input bar (5 lines) + legend (1 line)
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(5),
-            Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Length(1),
         ])
         .split(area);
@@ -95,7 +95,7 @@ mod tests {
         let panes = compute_layout(area, &config);
         assert!(panes.project_tree.is_some());
         assert!(panes.model_panel.is_some());
-        assert_eq!(panes.input_bar.height, 3);
+        assert_eq!(panes.input_bar.height, 5);
     }
 
     #[test]
