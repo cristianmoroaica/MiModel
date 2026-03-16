@@ -942,6 +942,18 @@ impl<'a> App<'a> {
                 self.send_decompose_prompt(&clean_text);
                 return;
             }
+            Phase::Component => {
+                let trimmed = clean_text.trim().to_lowercase();
+                if trimmed == "approve" || trimmed == "ok" || trimmed == "next" {
+                    self.approve_current_component();
+                } else if trimmed == "undo" {
+                    self.undo_component();
+                } else {
+                    // Text feedback — refine current component
+                    self.send_component_feedback(&clean_text, all_images);
+                }
+                return;
+            }
             // For other phases, fall through to existing monolithic path (for now)
             _ => {}
         }
@@ -1174,6 +1186,19 @@ impl<'a> App<'a> {
                             Phase::Decompose => {
                                 self.handle_decompose_response(&response);
                                 self.busy = BusyState::Idle;
+                            }
+                            Phase::Component => {
+                                // Parse response for cadquery code block
+                                let parsed = parser::parse_response(&response);
+                                if let Some(code_block) = parsed.code {
+                                    // Build the component
+                                    self.busy = BusyState::Building;
+                                    let build_result = self.session.build(&code_block.code, code_block.engine);
+                                    self.handle_component_build_result(build_result, code_block.code);
+                                } else {
+                                    // No code in response — just a conversation message
+                                    self.busy = BusyState::Idle;
+                                }
                             }
                             _ => {
                                 // Existing monolithic path: parse for code, build
@@ -1458,7 +1483,7 @@ impl<'a> App<'a> {
         self.conversation.add("system", &format!("Switched to {} phase", target.label()));
     }
 
-    // -- Phase-specific input handlers (stubs for Chunk 6) --
+    // -- Phase-specific input handlers --
 
     #[allow(dead_code)]
     fn handle_spec_input(&mut self, _text: &str) {
@@ -1471,11 +1496,6 @@ impl<'a> App<'a> {
     }
 
     #[allow(dead_code)]
-    fn handle_component_input(&mut self, _text: &str) {
-        // Will be implemented in Chunk 7: send component build prompt, build STL
-    }
-
-    #[allow(dead_code)]
     fn handle_assembly_input(&mut self, _text: &str) {
         // Will be implemented in Chunk 8: send assembly prompt, combine STLs
     }
@@ -1483,6 +1503,185 @@ impl<'a> App<'a> {
     #[allow(dead_code)]
     fn handle_refinement_input(&mut self, _text: &str) {
         // Will be implemented in Chunk 8: send refinement prompt, rebuild with tweaked params
+    }
+
+    // -- Component phase methods --
+
+    /// Start building the current component by sending an initial prompt to Claude.
+    fn start_component_build(&mut self) {
+        let idx = self.component_list.selected();
+        let component_name = self.component_list.selected_id()
+            .unwrap_or("unknown")
+            .to_string();
+        let total = self.component_list.len();
+        let component_info = format!(
+            "Generate CadQuery code for component {}/{}: '{}'.",
+            idx + 1, total, component_name
+        );
+        self.send_component_prompt(&component_info, vec![]);
+    }
+
+    fn send_component_prompt(&mut self, text: &str, images: Vec<PathBuf>) {
+        self.busy = BusyState::Thinking;
+        self.streaming_text.clear();
+
+        let model = self.claude_model.clone();
+        let session_id = self.claude_session_id.clone();
+        let tx = self.bg_tx.clone();
+        let stream_tx = self.stream_tx.clone();
+        let bg_pid = Arc::clone(&self.bg_pid);
+        let prompt = text.to_string();
+
+        std::thread::spawn(move || {
+            let result = claude::send_with_phase_prompt(
+                &model,
+                "component",
+                session_id.as_deref(),
+                &prompt,
+                &images,
+                Some(&stream_tx),
+                Some(&bg_pid),
+            );
+            bg_pid.store(0, Ordering::SeqCst);
+            match result {
+                Ok((response, new_sid)) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Ok(response),
+                        session_id: new_sid.or(session_id),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Err(e),
+                        session_id: None,
+                    });
+                }
+            }
+        });
+    }
+
+    fn send_component_feedback(&mut self, text: &str, images: Vec<PathBuf>) {
+        self.busy = BusyState::Thinking;
+        self.streaming_text.clear();
+
+        let model = self.claude_model.clone();
+        let session_id = self.claude_session_id.clone();
+        let tx = self.bg_tx.clone();
+        let stream_tx = self.stream_tx.clone();
+        let bg_pid = Arc::clone(&self.bg_pid);
+        let prompt = text.to_string();
+
+        // Use "component" prompt for initial generation, "refinement" for feedback
+        // If we already have code for this component, use refinement
+        let phase_prompt = if self.session.current_code.is_some() {
+            "refinement"
+        } else {
+            "component"
+        };
+        let phase_name = phase_prompt.to_string();
+
+        std::thread::spawn(move || {
+            let result = claude::send_with_phase_prompt(
+                &model,
+                &phase_name,
+                session_id.as_deref(),
+                &prompt,
+                &images,
+                Some(&stream_tx),
+                Some(&bg_pid),
+            );
+            bg_pid.store(0, Ordering::SeqCst);
+            match result {
+                Ok((response, new_sid)) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Ok(response),
+                        session_id: new_sid.or(session_id),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Err(e),
+                        session_id: None,
+                    });
+                }
+            }
+        });
+    }
+
+    fn handle_component_build_result(&mut self, build_result: python::BuildResult, _code: String) {
+        match build_result {
+            python::BuildResult::Success(ref meta) => {
+                self.conversation.add("system", &format!(
+                    "Component built: {:.1} x {:.1} x {:.1} mm",
+                    meta.dimensions.x, meta.dimensions.y, meta.dimensions.z
+                ));
+
+                // Update model panel
+                let stl_path = self.session.latest_stl_path();
+                self.model_panel.update(meta, stl_path.as_deref(), self.session.iteration());
+
+                // Update viewer
+                if let Some(ref src) = stl_path {
+                    let _ = self.viewer.update_working_stl(src);
+                    if !self.viewer.is_running() {
+                        let _ = self.viewer.show();
+                    }
+                }
+
+                self.conversation.add("system", "Type 'approve' to accept, or describe changes.");
+            }
+            python::BuildResult::BuildError(ref e) | python::BuildResult::SyntaxError(ref e) => {
+                self.conversation.add("system", &format!("Build error: {}", e.error));
+            }
+            python::BuildResult::Timeout => {
+                self.conversation.add("system", "Build timed out.");
+            }
+        }
+        self.busy = BusyState::Idle;
+    }
+
+    fn approve_current_component(&mut self) {
+        let total = self.component_list.len();
+        let current = self.component_list.selected();
+
+        if total == 0 {
+            self.conversation.add("system", "No components to approve.");
+            return;
+        }
+
+        if current + 1 < total {
+            // Move to next component
+            self.component_list.select_next();
+            self.claude_session_id = None; // Fresh session for next component
+            self.conversation.add("system", &format!(
+                "Component approved! Moving to component {}/{}.",
+                current + 2, total
+            ));
+            // Auto-start build for next component
+            // self.start_component_build();
+        } else {
+            // Last component — transition to Assembly
+            self.conversation.add("system", "All components approved! Transitioning to Assembly phase.");
+            self.phase = Phase::Assembly;
+            self.layout_config.phase = Phase::Assembly;
+            self.claude_session_id = None;
+        }
+    }
+
+    fn undo_component(&mut self) {
+        if self.session.undo() {
+            self.conversation.add("system", "Undid last component iteration.");
+            // Update model panel and viewer
+            if let Some(ref meta) = self.session.current_metadata {
+                let stl_path = self.session.latest_stl_path();
+                self.model_panel.update(meta, stl_path.as_deref(), self.session.iteration());
+                if let Some(ref src) = stl_path {
+                    let _ = self.viewer.update_working_stl(src);
+                }
+            }
+        } else {
+            self.conversation.add("system", "Nothing to undo.");
+        }
     }
 }
 
