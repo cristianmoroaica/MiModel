@@ -16,6 +16,7 @@ mod viewer;
 
 use crate::config::Config;
 use crate::model_session::Session;
+use crate::phase::Phase;
 use crate::storage::Project;
 use crate::tui::{BackgroundResult, BusyState, Focus};
 use crate::tui::layout::{LayoutConfig, compute_layout};
@@ -47,6 +48,7 @@ struct App<'a> {
     focus: Focus,
     busy: BusyState,
     layout_config: LayoutConfig,
+    phase: Phase,
 
     // Panes
     project_tree: ProjectTreePane,
@@ -132,6 +134,7 @@ impl<'a> App<'a> {
             focus: Focus::ProjectTree,
             busy: BusyState::Idle,
             layout_config: LayoutConfig::default(),
+            phase: Phase::Spec,
             project_tree,
             conversation: ConversationPane::new(),
             model_panel: ModelPanel::new(),
@@ -276,8 +279,10 @@ impl<'a> App<'a> {
 
         // Render legend bar
         let legend_area = panes.legend;
-        let legend_text = match self.focus {
-            Focus::Input => Line::from(vec![
+        let mut legend_spans = self.phase_indicator_spans();
+        legend_spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        let focus_spans: Vec<Span> = match self.focus {
+            Focus::Input => vec![
                 Span::styled(" Enter ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Send "),
                 Span::styled(" PgUp/Dn ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
@@ -290,8 +295,8 @@ impl<'a> App<'a> {
                 Span::raw(" Img "),
                 Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Quit "),
-            ]),
-            Focus::ProjectTree => Line::from(vec![
+            ],
+            Focus::ProjectTree => vec![
                 Span::styled(" j/k ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Navigate "),
                 Span::styled(" Enter ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
@@ -304,8 +309,8 @@ impl<'a> App<'a> {
                 Span::raw(" Panes "),
                 Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Quit "),
-            ]),
-            Focus::Conversation => Line::from(vec![
+            ],
+            Focus::Conversation => vec![
                 Span::styled(" j/k ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Scroll "),
                 Span::styled(" u/d ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
@@ -314,9 +319,36 @@ impl<'a> App<'a> {
                 Span::raw(" Panes "),
                 Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Quit "),
-            ]),
+            ],
         };
+        legend_spans.extend(focus_spans);
+        let legend_text = Line::from(legend_spans);
         frame.render_widget(Paragraph::new(legend_text), legend_area);
+    }
+
+    /// Build phase indicator spans for the legend bar.
+    /// Shows: " Spec ● ○ ○ ○ ○ " with the current phase filled.
+    fn phase_indicator_spans(&self) -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        let current_idx = self.phase.index();
+
+        // Phase label
+        let label = format!(" {} ", self.phase.label());
+        spans.push(Span::styled(label, Style::default().fg(Color::White).bold()));
+
+        // Phase dots
+        for i in 0..5 {
+            let dot = if i == current_idx { "\u{25cf}" } else { "\u{25cb}" };
+            let style = if i == current_idx {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            spans.push(Span::styled(format!(" {dot}"), style));
+        }
+        spans.push(Span::raw(" "));
+
+        spans
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -1216,6 +1248,7 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         focus: Focus::Input,
         busy: BusyState::Idle,
         layout_config: LayoutConfig::default(),
+        phase: Phase::Spec,
         project_tree: pt,
         conversation: ConversationPane::new(),
         model_panel: ModelPanel::new(),
