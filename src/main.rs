@@ -891,6 +891,8 @@ impl<'a> App<'a> {
         self.session.add_user_message(&clean_text);
 
         // Set busy state
+        // TODO(Chunk 6): This monolithic path sends all input to Claude regardless of phase.
+        // Replace with phase-specific dispatch: self.handle_{spec,decompose,component,...}_input()
         self.busy = BusyState::Thinking;
         self.streaming_text.clear();
 
@@ -1211,6 +1213,33 @@ impl<'a> App<'a> {
                 libc::kill(pid as i32, libc::SIGTERM);
             }
         }
+    }
+
+    // -- Phase-specific input handlers (stubs for Chunk 6) --
+
+    #[allow(dead_code)]
+    fn handle_spec_input(&mut self, _text: &str) {
+        // Will be implemented in Chunk 6: send spec prompt, parse spec.toml response
+    }
+
+    #[allow(dead_code)]
+    fn handle_decompose_input(&mut self, _text: &str) {
+        // Will be implemented in Chunk 6: send decompose prompt, parse component tree
+    }
+
+    #[allow(dead_code)]
+    fn handle_component_input(&mut self, _text: &str) {
+        // Will be implemented in Chunk 7: send component build prompt, build STL
+    }
+
+    #[allow(dead_code)]
+    fn handle_assembly_input(&mut self, _text: &str) {
+        // Will be implemented in Chunk 8: send assembly prompt, combine STLs
+    }
+
+    #[allow(dead_code)]
+    fn handle_refinement_input(&mut self, _text: &str) {
+        // Will be implemented in Chunk 8: send refinement prompt, rebuild with tweaked params
     }
 }
 
