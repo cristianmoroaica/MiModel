@@ -934,6 +934,11 @@ impl<'a> App<'a> {
                 return;
             }
             Phase::Decompose => {
+                if clean_text.trim().eq_ignore_ascii_case("approve") {
+                    self.approve_decomposition();
+                    return;
+                }
+                // Otherwise, send as feedback to Claude
                 self.send_decompose_prompt(&clean_text);
                 return;
             }
@@ -1082,8 +1087,69 @@ impl<'a> App<'a> {
         }
     }
 
-    fn handle_decompose_response(&mut self, _response: &str) {
-        // Stub for Task 19 — Decompose phase response handling
+    fn handle_decompose_response(&mut self, response: &str) {
+        match parser::parse_toml_response(response) {
+            Ok(toml_str) => {
+                // Parse the TOML and display components in the tree panel
+                self.parse_and_display_components(&toml_str);
+
+                self.conversation.add("system",
+                    "Component tree proposed. Type 'approve' to accept, or describe changes.");
+            }
+            Err(e) => {
+                self.conversation.add("system",
+                    &format!("Failed to parse component structure: {e}. Please try again."));
+            }
+        }
+    }
+
+    fn parse_and_display_components(&mut self, toml_str: &str) {
+        use crate::tui::component_tree::TreeComponent;
+
+        match toml::from_str::<toml::Value>(toml_str) {
+            Ok(value) => {
+                let mut tree_components = Vec::new();
+
+                if let Some(components) = value.get("components").and_then(|c| c.as_array()) {
+                    for comp in components {
+                        let id = comp.get("id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                        let name = comp.get("name").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
+                        let assembly_op = comp.get("assembly_op").and_then(|v| v.as_str()).unwrap_or("none").to_string();
+                        let depends_on: Vec<String> = comp.get("depends_on")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                            .unwrap_or_default();
+
+                        tree_components.push(TreeComponent { id, name, depends_on, assembly_op });
+                    }
+                }
+
+                self.component_tree_panel.set_components(&tree_components);
+
+                // Store the raw TOML for later merging into spec
+                self.spec_panel.set_content(toml_str);
+            }
+            Err(e) => {
+                self.conversation.add("system", &format!("TOML parse error: {e}"));
+            }
+        }
+    }
+
+    fn approve_decomposition(&mut self) {
+        let toml_str = self.spec_panel.content().to_string();
+        if toml_str.is_empty() {
+            self.conversation.add("system", "No component structure to approve. Ask Claude to decompose first.");
+            return;
+        }
+
+        // TODO: Merge the component TOML into the spec.toml file
+        // TODO: Create component directories using the parsed components
+        // For now, just transition to Component phase
+
+        self.conversation.add("system", "Component structure approved! Transitioning to Component phase.");
+        self.phase = Phase::Component;
+        self.layout_config.phase = Phase::Component;
+        self.claude_session_id = None; // Fresh session for Component phase
     }
 
     fn handle_bg_result(&mut self, result: BackgroundResult) {

@@ -14,6 +14,47 @@ pub struct CodeBlock {
     pub engine: Engine,
 }
 
+/// Extract TOML content from Claude's response (for Decompose phase).
+/// Handles both raw TOML and ```toml fenced blocks.
+/// Validates that the extracted content parses as TOML before returning.
+pub fn parse_toml_response(response: &str) -> Result<String, String> {
+    // 1. Try to extract from ```toml ... ``` fenced block
+    let mut in_toml = false;
+    let mut toml_content = String::new();
+
+    for line in response.lines() {
+        if !in_toml {
+            if line.trim().starts_with("```toml") {
+                in_toml = true;
+                toml_content.clear();
+                continue;
+            }
+        } else if line.trim() == "```" {
+            // End of fenced block — validate and return
+            match toml::from_str::<toml::Value>(&toml_content) {
+                Ok(_) => return Ok(toml_content),
+                Err(e) => return Err(format!("TOML in fenced block is invalid: {e}")),
+            }
+        } else {
+            toml_content.push_str(line);
+            toml_content.push('\n');
+        }
+    }
+
+    // If we were in a toml block but never closed it, try what we have
+    if in_toml && !toml_content.is_empty() {
+        if toml::from_str::<toml::Value>(&toml_content).is_ok() {
+            return Ok(toml_content);
+        }
+    }
+
+    // 2. If no fenced block found, try the entire response as raw TOML
+    match toml::from_str::<toml::Value>(response) {
+        Ok(_) => Ok(response.to_string()),
+        Err(_) => Err("No valid TOML found in response".to_string()),
+    }
+}
+
 pub fn parse_response(response: &str) -> ParsedResponse {
     let mut text = String::new();
     let mut code_block: Option<CodeBlock> = None;
@@ -113,5 +154,26 @@ mod tests {
         assert!(r.text.contains("Making it:"));
         assert!(r.text.contains("Done!"));
         assert!(r.code.is_some());
+    }
+
+    #[test]
+    fn test_parse_toml_fenced() {
+        let response = "Here are the components:\n\n```toml\n[[components]]\nid = \"body\"\n```\n\nLooks good.";
+        let toml = parse_toml_response(response).unwrap();
+        assert!(toml.contains("[[components]]"));
+        assert!(toml.contains("id = \"body\""));
+    }
+
+    #[test]
+    fn test_parse_toml_raw() {
+        let response = "[[components]]\nid = \"body\"\nname = \"Body\"\n\n[assembly]\norder = [\"body\"]";
+        let toml = parse_toml_response(response).unwrap();
+        assert!(toml.contains("[[components]]"));
+    }
+
+    #[test]
+    fn test_parse_toml_invalid() {
+        let response = "I can't generate components for this.";
+        assert!(parse_toml_response(response).is_err());
     }
 }
