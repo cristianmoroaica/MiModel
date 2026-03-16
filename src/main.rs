@@ -309,6 +309,9 @@ impl<'a> App<'a> {
         let legend_area = panes.legend;
         let mut legend_spans = self.phase_indicator_spans();
         legend_spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        legend_spans.push(Span::styled(" Alt+1-5 ", Style::default().fg(Color::Black).bg(Color::DarkGray)));
+        legend_spans.push(Span::raw(" Phase "));
+        legend_spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
         let focus_spans: Vec<Span> = match self.focus {
             Focus::Input => vec![
                 Span::styled(" Enter ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
@@ -543,6 +546,40 @@ impl<'a> App<'a> {
                     }
                 } else {
                     self.conversation.add("system", "No model to export yet.");
+                }
+                return;
+            }
+            // Phase navigation: Alt+1 through Alt+5
+            (Char('1'), KeyModifiers::ALT) => {
+                self.try_switch_phase(Phase::Spec);
+                return;
+            }
+            (Char('2'), KeyModifiers::ALT) => {
+                self.try_switch_phase(Phase::Decompose);
+                return;
+            }
+            (Char('3'), KeyModifiers::ALT) => {
+                self.try_switch_phase(Phase::Component);
+                return;
+            }
+            (Char('4'), KeyModifiers::ALT) => {
+                self.try_switch_phase(Phase::Assembly);
+                return;
+            }
+            (Char('5'), KeyModifiers::ALT) => {
+                self.try_switch_phase(Phase::Refinement);
+                return;
+            }
+            // Component navigation: Ctrl+Left/Right (only in Component phase)
+            (Left, KeyModifiers::CONTROL) => {
+                if self.phase == Phase::Component {
+                    self.component_list.select_prev();
+                }
+                return;
+            }
+            (Right, KeyModifiers::CONTROL) => {
+                if self.phase == Phase::Component {
+                    self.component_list.select_next();
                 }
                 return;
             }
@@ -1213,6 +1250,19 @@ impl<'a> App<'a> {
                 libc::kill(pid as i32, libc::SIGTERM);
             }
         }
+    }
+
+    /// Attempt to switch to a different phase.
+    /// For now, allows free navigation between phases.
+    /// Prerequisite validation will be added when phase flows are implemented.
+    fn try_switch_phase(&mut self, target: Phase) {
+        if target == self.phase {
+            return; // Already here
+        }
+        self.phase = target;
+        self.layout_config.phase = target;
+        // Add system message about phase change
+        self.conversation.add("system", &format!("Switched to {} phase", target.label()));
     }
 
     // -- Phase-specific input handlers (stubs for Chunk 6) --
