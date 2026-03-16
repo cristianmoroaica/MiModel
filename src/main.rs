@@ -184,7 +184,8 @@ impl<'a> App<'a> {
         let conv_area = panes.conversation;
         let mut conv = ConversationPane {
             entries: self.conversation.entries.clone(),
-            scroll_offset: self.conversation.scroll_offset,
+            // When auto-scrolling, use MAX so render clamps to actual bottom
+            scroll_offset: if self.conversation.auto_scroll { u16::MAX } else { self.conversation.scroll_offset },
             auto_scroll: self.conversation.auto_scroll,
         };
         // Show streaming text or spinner when busy
@@ -961,11 +962,20 @@ impl<'a> App<'a> {
                         self.conversation.add(&msg.role, &msg.content);
                     }
 
-                    // Update model panel
+                    // Update model panel and viewer
+                    let stl_path = loaded_session.latest_stl_path();
                     if let Some(ref meta) = loaded_session.current_metadata {
-                        self.model_panel.update(meta, None, 0);
+                        self.model_panel.update(meta, stl_path.as_deref(), loaded_session.iteration());
                     } else {
                         self.model_panel.clear();
+                    }
+                    if let Some(ref src) = stl_path {
+                        if let Err(e) = self.viewer.update_working_stl(src) {
+                            self.conversation.add("system", &format!("Warning: {e}"));
+                        }
+                        if !self.viewer.is_running() {
+                            let _ = self.viewer.show();
+                        }
                     }
 
                     self.session = loaded_session;
@@ -1063,6 +1073,40 @@ impl<'a> App<'a> {
                     if let Ok(content) = std::fs::read_to_string(&doc_path) {
                         let preview: String = content.lines().take(20).collect::<Vec<_>>().join("\n");
                         self.conversation.add("system", &format!("{doc_name}:\n{preview}"));
+                    }
+                }
+            }
+
+            // Open latest STL in f3d if any session has one
+            if let Some(project) = self.projects.get(project_idx) {
+                let mut latest_stl: Option<PathBuf> = None;
+                // Check sessions in reverse (last = most recent)
+                for sname in project.sessions.iter().rev() {
+                    let session_path = project.path.join(sname);
+                    // Find highest iteration STL
+                    if let Ok(entries) = std::fs::read_dir(&session_path) {
+                        let mut stls: Vec<PathBuf> = entries.flatten()
+                            .map(|e| e.path())
+                            .filter(|p| {
+                                p.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(|n| n.starts_with("iter_") && n.ends_with(".stl"))
+                                    .unwrap_or(false)
+                            })
+                            .collect();
+                        stls.sort();
+                        if let Some(stl) = stls.last() {
+                            latest_stl = Some(stl.clone());
+                            break;
+                        }
+                    }
+                }
+                if let Some(ref stl) = latest_stl {
+                    if let Err(e) = self.viewer.update_working_stl(stl) {
+                        self.conversation.add("system", &format!("Warning: {e}"));
+                    }
+                    if !self.viewer.is_running() {
+                        let _ = self.viewer.show();
                     }
                 }
             }

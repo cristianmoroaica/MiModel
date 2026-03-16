@@ -30,10 +30,13 @@ impl Viewer {
     }
 
     /// Update the working.stl with new content from the latest build.
-    /// f3d will auto-reload via --watch.
+    /// Uses write-to-temp + rename so f3d's file watcher detects the inode change.
     pub fn update_working_stl(&self, source_stl: &Path) -> Result<(), String> {
         if let Some(ref working) = self.working_stl {
-            std::fs::copy(source_stl, working)
+            let tmp = working.with_extension("stl.tmp");
+            std::fs::copy(source_stl, &tmp)
+                .map_err(|e| format!("Failed to copy to temp: {e}"))?;
+            std::fs::rename(&tmp, working)
                 .map_err(|e| format!("Failed to update working.stl: {e}"))?;
             Ok(())
         } else {
