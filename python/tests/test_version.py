@@ -8,4 +8,4 @@ def test_version_output():
         capture_output=True, text=True,
     )
     assert result.returncode == 0
-    assert "ai3d-cad 0.1.0 (protocol 1)" in result.stdout
+    assert "ai3d-cad 0.2.0 (protocol 2)" in result.stdout

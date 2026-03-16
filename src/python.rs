@@ -76,9 +76,9 @@ pub fn check_python(python: &str) -> Result<(), String> {
     }
 
     let version_str = String::from_utf8_lossy(&output.stdout);
-    if !version_str.contains("protocol 1") {
+    if !version_str.contains("protocol 2") && !version_str.contains("protocol 1") {
         return Err(format!(
-            "Incompatible ai3d-cad version: {}. Expected protocol 1.",
+            "Incompatible ai3d-cad version: {}. Expected protocol 1 or 2.",
             version_str.trim()
         ));
     }
