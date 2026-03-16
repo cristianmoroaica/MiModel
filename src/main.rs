@@ -6,6 +6,7 @@ mod model_session;
 mod parser;
 mod phase;
 mod preview;
+mod prompt_builder;
 mod python;
 mod spec;
 mod stl;
