@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// Locate the system prompt file (prompts/system.md).
+/// Locate the legacy system prompt file (prompts/legacy.md).
 /// Walks up from cwd and binary dir to find the project root.
 fn find_system_prompt() -> Result<PathBuf, String> {
     let starts: Vec<PathBuf> = [
@@ -18,7 +18,7 @@ fn find_system_prompt() -> Result<PathBuf, String> {
     for start in &starts {
         let mut dir = start.as_path();
         loop {
-            let candidate = dir.join("prompts/system.md");
+            let candidate = dir.join("prompts/legacy.md");
             if candidate.exists() {
                 return Ok(candidate);
             }
@@ -28,7 +28,7 @@ fn find_system_prompt() -> Result<PathBuf, String> {
             }
         }
     }
-    Err("prompts/system.md not found. Run from within the MiModel project.".to_string())
+    Err("prompts/legacy.md not found. Run from within the MiModel project.".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn test_system_prompt_found() {
         let result = find_system_prompt();
-        assert!(result.is_ok(), "prompts/system.md not found: {:?}", result);
+        assert!(result.is_ok(), "prompts/legacy.md not found: {:?}", result);
     }
 
     #[test]
