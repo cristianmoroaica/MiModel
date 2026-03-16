@@ -494,7 +494,7 @@ Add `mod component;` to `src/main.rs` module declarations.
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test --lib component::tests -q`
-Expected: PASS (4 tests)
+Expected: PASS (5 tests)
 
 - [ ] **Step 6: Commit**
 
