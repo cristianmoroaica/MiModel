@@ -1,4 +1,5 @@
 mod claude;
+mod component;
 mod config;
 mod image;
 mod model_session;
