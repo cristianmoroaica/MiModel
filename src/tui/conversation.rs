@@ -54,8 +54,14 @@ impl ConversationPane {
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = u16::MAX; // will be clamped during render
+        self.scroll_offset = u16::MAX;
         self.auto_scroll = true;
+    }
+
+    /// Clamp scroll offset to actual content height. Call after render to keep
+    /// the offset in range so scroll_up() works correctly from a real position.
+    pub fn clamp_scroll(&mut self, max_scroll: u16) {
+        self.scroll_offset = self.scroll_offset.min(max_scroll);
     }
 
     pub fn clear(&mut self) {
@@ -63,8 +69,8 @@ impl ConversationPane {
         self.scroll_offset = 0;
     }
 
-    /// Render the conversation into the given area.
-    pub fn render(&self, frame: &mut Frame, area: Rect, focused: bool) {
+    /// Render the conversation into the given area. Returns max_scroll for clamping.
+    pub fn render(&self, frame: &mut Frame, area: Rect, focused: bool) -> u16 {
         let border_color = if focused { Color::Cyan } else { Color::DarkGray };
         let block = Block::default()
             .borders(Borders::ALL)
@@ -116,5 +122,6 @@ impl ConversationPane {
             .scroll((scroll, 0));
 
         frame.render_widget(paragraph, area);
+        max_scroll
     }
 }

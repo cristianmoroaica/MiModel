@@ -188,7 +188,9 @@ impl<'a> App<'a> {
                 content: msg,
             });
         }
-        conv.render(frame, conv_area, self.focus == Focus::Conversation);
+        let max_scroll = conv.render(frame, conv_area, self.focus == Focus::Conversation);
+        // Write the clamped scroll back so scroll_up() works from a real position
+        self.conversation.scroll_offset = self.conversation.scroll_offset.min(max_scroll);
 
         // Render model panel if visible
         if let Some(panel_area) = panes.model_panel {
@@ -218,14 +220,14 @@ impl<'a> App<'a> {
             Focus::Input => Line::from(vec![
                 Span::styled(" Enter ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Send "),
-                Span::styled(" \\+Enter ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Newline "),
+                Span::styled(" PgUp/Dn ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
+                Span::raw(" Scroll "),
                 Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Switch pane "),
+                Span::raw(" Panes "),
                 Span::styled(" Ctrl+W ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Save part "),
+                Span::raw(" Save "),
                 Span::styled(" Ctrl+V ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Paste img "),
+                Span::raw(" Img "),
                 Span::styled(" q ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Quit "),
             ]),
@@ -262,6 +264,15 @@ impl<'a> App<'a> {
 
         // Global keybindings regardless of focus
         match (key.code, key.modifiers) {
+            // Scroll conversation from any pane with PageUp/PageDown
+            (PageUp, _) => {
+                self.conversation.scroll_up(10);
+                return;
+            }
+            (PageDown, _) => {
+                self.conversation.scroll_down(10);
+                return;
+            }
             (Char('l'), KeyModifiers::CONTROL) => {
                 self.layout_config.show_sidebar = !self.layout_config.show_sidebar;
                 return;
