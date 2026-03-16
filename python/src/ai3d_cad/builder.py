@@ -33,7 +33,7 @@ def _analyze_stl(stl_path: Path) -> dict[str, Any]:
     }
 
 
-def build(code_path: str, output_path: str, engine: str) -> int:
+def build(code_path: str, output_path: str, engine: str, step_path: str | None = None) -> int:
     code_file = Path(code_path)
     out_file = Path(output_path)
 
@@ -44,7 +44,7 @@ def build(code_path: str, output_path: str, engine: str) -> int:
     code = code_file.read_text()
 
     if engine == "cadquery":
-        return _build_cadquery(code, code_file, out_file)
+        return _build_cadquery(code, code_file, out_file, step_path=step_path)
     elif engine == "openscad":
         return _build_openscad(code, code_file, out_file)
     else:
@@ -52,7 +52,7 @@ def build(code_path: str, output_path: str, engine: str) -> int:
         return 1
 
 
-def _build_cadquery(code: str, code_file: Path, out_file: Path) -> int:
+def _build_cadquery(code: str, code_file: Path, out_file: Path, step_path: str | None = None) -> int:
     try:
         compile(code, str(code_file), "exec")
     except SyntaxError as e:
@@ -92,6 +92,13 @@ def _build_cadquery(code: str, code_file: Path, out_file: Path) -> int:
         traceback.print_exc(file=sys.stderr)
         _emit_error("build", f"STL export failed: {e}")
         return 1
+
+    if step_path is not None:
+        try:
+            from cadquery import exporters as cq_exporters
+            cq_exporters.export(result_obj, step_path, "STEP")
+        except Exception as e:
+            print(f"Warning: STEP export failed: {e}", file=sys.stderr)
 
     features = _extract_features(code)
     try:

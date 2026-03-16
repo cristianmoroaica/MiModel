@@ -17,6 +17,7 @@ def main():
     build_parser.add_argument("--code", required=True, help="Path to .py or .scad file")
     build_parser.add_argument("--output", required=True, help="Output STL path")
     build_parser.add_argument("--engine", choices=["cadquery", "openscad"], default="cadquery")
+    build_parser.add_argument("--step", default=None, help="Optional output STEP path (CadQuery only)")
 
     info_parser = subparsers.add_parser("info", help="Analyze an existing STL")
     info_parser.add_argument("--input", required=True, help="Path to STL file")
@@ -29,7 +30,7 @@ def main():
 
     if args.command == "build":
         from .builder import build
-        sys.exit(build(args.code, args.output, args.engine))
+        sys.exit(build(args.code, args.output, args.engine, step_path=args.step))
     elif args.command == "info":
         from .analyzer import info
         sys.exit(info(args.input))

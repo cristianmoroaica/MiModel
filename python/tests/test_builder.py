@@ -103,3 +103,23 @@ result = result.edges().fillet(50)
         assert r.returncode == 1
         err = json.loads(r.stdout)
         assert err["error_type"] == "build"
+
+
+def test_build_cadquery_with_step_export(tmp_path):
+    code = '''
+import cadquery as cq
+result = cq.Workplane("XY").box(10, 10, 10)
+# feature: test cube
+'''
+    code_path = tmp_path / "test.py"
+    code_path.write_text(code)
+    stl_path = tmp_path / "test.stl"
+    step_path = tmp_path / "test.step"
+
+    from ai3d_cad.builder import build
+    exit_code = build(str(code_path), str(stl_path), "cadquery", step_path=str(step_path))
+
+    assert exit_code == 0
+    assert stl_path.exists()
+    assert step_path.exists()
+    assert step_path.stat().st_size > 0
