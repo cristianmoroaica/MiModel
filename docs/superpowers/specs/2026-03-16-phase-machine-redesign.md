@@ -59,6 +59,8 @@ Phases are not strictly linear — the user can jump back. Editing the spec re-e
 
 ### Spec Format (TOML)
 
+Phase 1 outputs only the `[model]` section — high-level dimensions and functional requirements, no components:
+
 ```toml
 [model]
 name = "SW280 Watch Case"
@@ -70,6 +72,26 @@ print_method = "resin"
 max_x = 42.0
 max_y = 42.0
 max_z = 14.0
+
+[model.features]
+items = [
+  "Movement cavity for Sellita SW280 (25.6mm diameter, 4.35mm deep)",
+  "Stem bore at 3 o'clock for crown tube",
+  "Rotor clearance pocket",
+  "Two lugs for 20mm strap with spring bar holes"
+]
+
+[model.constraints]
+items = [
+  "Wall thickness >= 1.5mm for resin printing",
+  "Must accommodate movement + rotor height"
+]
+```
+
+Phase 2 (Decompose) adds the `[[components]]` and `[assembly]` sections:
+
+```toml
+# ... [model] section from Phase 1 above ...
 
 [[components]]
 id = "case_body"
@@ -96,6 +118,7 @@ notes = "Movement cavity is a boolean subtraction from case_body."
 ```
 
 Key properties:
+- **Two-phase authoring** — Phase 1 defines _what_ the model is, Phase 2 defines _how_ it decomposes.
 - **Parameters are typed with units and descriptions** — Claude and user both reference them by name.
 - **`depends_on`** defines build order.
 - **Constraints** are natural language guardrails for Claude during generation.
@@ -114,7 +137,7 @@ Key properties:
 
 **TUI mode:** Right panel shows proposed component tree with dependency arrows.
 
-**Claude prompt:** Decomposition-only system prompt. Outputs TOML, no prose. Rules: each component must be independently buildable, under 50 lines of CadQuery, no circular dependencies.
+**Claude prompt:** Decomposition-only system prompt. Outputs TOML, no prose. Rules: each component must be independently buildable, aiming for under 80 lines of CadQuery, no circular dependencies.
 
 **Token budget:** Single Claude call, ~300-600 tokens input.
 
@@ -125,7 +148,7 @@ Key properties:
 **Input:** One component definition from `spec.toml` + code of approved dependency components (for reference).
 
 **Flow per component:**
-1. Claude generates CadQuery code (~20-50 lines)
+1. Claude generates CadQuery code (~20-80 lines)
 2. Python subprocess builds STL + STEP
 3. f3d shows the component
 4. Assembly auto-updates (progressive)
@@ -137,7 +160,7 @@ Key properties:
 
 **TUI mode:** Left panel shows component list with status (pending/building/approved). Right panel shows component parameters + metadata + braille preview. Conversation scoped to current component only.
 
-**Claude prompt:** Component-only system prompt. Receives: component name, parameters, constraints, dependency code. Outputs a single fenced `cadquery` block, nothing else. Rules: all tunable parameters as UPPERCASE constants at the top, assign final shape to `result`, use `# feature:` comments, keep under 50 lines.
+**Claude prompt:** Component-only system prompt. Receives: component name, parameters, constraints, dependency code. Outputs a single fenced `cadquery` block, nothing else. Rules: all tunable parameters as UPPERCASE constants at the top, assign final shape to `result`, use `# feature:` comments, aim for under 80 lines (guideline, not hard limit — scoped complexity matters more than line count).
 
 **Token budget:** ~500-1500 tokens input per call. ~1-2 calls per component.
 
@@ -178,12 +201,30 @@ result = (
 ```json
 {
   "components": [
-    { "id": "case_body", "path": "components/case_body/case_body.py", "role": "base" },
-    { "id": "movement_cavity", "path": "components/movement_cavity/movement_cavity.py", "op": "subtract", "from": "case_body" },
-    { "id": "lug_pair", "path": "components/lug_pair/lug_pair.py", "op": "fuse", "to": "case_body" }
+    {
+      "id": "case_body",
+      "path": "components/case_body/case_body.py",
+      "role": "base"
+    },
+    {
+      "id": "movement_cavity",
+      "path": "components/movement_cavity/movement_cavity.py",
+      "op": "subtract",
+      "from": "case_body",
+      "transform": { "translate": [0.0, 0.0, -1.2] }
+    },
+    {
+      "id": "lug_pair",
+      "path": "components/lug_pair/lug_pair.py",
+      "op": "fuse",
+      "to": "case_body",
+      "transform": { "translate": [0.0, 18.0, -6.0], "rotate": { "axis": [0, 0, 1], "degrees": 0 } }
+    }
   ]
 }
 ```
+
+**Positioning convention:** Each component is modeled at the origin. The assembly manifest specifies transforms (`translate`, `rotate`) to position it relative to the base component before applying the boolean operation. The base component stays at the origin. Transforms are derived from spatial relationships in `spec.toml` — Claude generates them during the Assembly phase, or the user can edit the manifest directly.
 
 **Claude prompt:** Assembly-only system prompt. Only called if user requests structural changes to how parts connect. Most assemblies are generated deterministically from the manifest without a Claude call.
 
@@ -207,10 +248,6 @@ No Claude call. Parameters are validated against spec constraints before buildin
 
 User describes a structural change scoped to one component. Claude receives: component spec + current code + feedback. Regenerates just that component. Assembly auto-rebuilds.
 
-### Sub-mode C: Visual Annotation (future)
-
-User references a feature by name from the spec (e.g., "make the crown bore deeper"). Claude gets the feature context and modifies accordingly.
-
 ## TUI Layout Per Phase
 
 The existing 3-column layout adapts per phase:
@@ -219,14 +256,14 @@ The existing 3-column layout adapts per phase:
 |-------|-----------|-------------|-------------|
 | **Spec** | Project tree | Q&A conversation + input | Live spec preview (TOML) |
 | **Decompose** | Project tree | Conversation + input | Component tree with deps |
-| **Component** | Component list (checkmarks) | Conversation scoped to component | Component params + metadata + preview |
-| **Assembly** | Component list | Assembly log / conversation | Full model metadata + preview |
+| **Component** | Component list (checkmarks) | Conversation scoped to component | Component params + metadata (dims, volume, features) |
+| **Assembly** | Component list | Assembly log / conversation | Full model metadata (dims, volume, features) |
 | **Refinement** | Component list | Conversation or param editor | Model metadata + diff from previous |
 
 ### Navigation
 
 - **Phase indicator** in status bar: shows current phase and progress (e.g., "Component 3/6: Crown Bore")
-- `Ctrl+1-5` to jump between phases (with confirmation if going backwards)
+- `Alt+1-5` to jump between phases (with confirmation if going backwards) — Alt avoids conflicts with terminal emulator tab switching
 - `Ctrl+Left/Right` to navigate between components within Component phase
 - `Tab` cycles between panels (unchanged)
 - **Parameter editor mode** in Refinement: Tab into right panel, edit value, Enter to rebuild
@@ -263,31 +300,15 @@ The existing 3-column layout adapts per phase:
 
 Nothing is cleaned up on quit. `working.stl` and `working.step` are real files preserved across sessions. History directories keep all iterations.
 
-## Component Library
+## Component Library (Future Work)
 
-Approved components are indexed in a project-level library:
+Not part of the initial implementation. The per-component file structure (`components/<id>/`) is designed to enable future library indexing without structural changes.
 
-```
-~/MiModel/<project>/library.toml
-```
-
-```toml
-[[components]]
-id = "case_body"
-name = "Case Body"
-source_session = "session_001"
-parameters = { outer_diameter = 40.0, height = 11.5, wall_thickness = 1.8 }
-tags = ["enclosure", "cylindrical", "resin"]
-path = "session_001/components/case_body/case_body.py"
-```
-
-### Reuse flow
-
-During Decompose phase of a new session:
-1. Claude proposes components
-2. System checks library for similar components (by tag + parameter overlap)
-3. If match found, user offered: "Reuse `case_body` from session_001 with modified parameters?"
-4. If yes: copy .py, substitute parameters, rebuild. No Claude call.
+Planned design for post-v1.0:
+- Project-level `library.toml` indexes approved components with tags and parameters
+- During Decompose phase, system checks library for similar components by tag + parameter overlap
+- User offered: "Reuse `case_body` from session_001 with modified parameters?"
+- If yes: copy .py, override parameters via `paramset`, rebuild. No Claude call.
 
 ## Python Execution Layer
 
@@ -303,7 +324,9 @@ python -m ai3d_cad validate  --code <py>
 
 ### `build` (modified)
 
-Adds `--step` flag to export STEP alongside STL. Otherwise unchanged.
+Adds `--step` flag to export STEP alongside STL via `cq.exporters.export(result, path, "STEP")`. This is new functionality — the current builder only exports STL. STEP export is CadQuery-only; the OpenSCAD engine cannot produce STEP files. If `--step` is passed with `--engine openscad`, it is silently skipped (a warning is logged but the build succeeds with STL only).
+
+**Note on OpenSCAD:** The phase machine redesign is CadQuery-focused. OpenSCAD remains available as a fallback engine for the `build` subcommand, but the component system prompts generate CadQuery exclusively. Users can still request OpenSCAD for individual components via text feedback, but it is not the default path.
 
 ### `assemble` (new)
 
@@ -311,7 +334,12 @@ Takes a manifest JSON. Executes each component .py in isolation, captures `resul
 
 ### `paramset` (new)
 
-For zero-Claude parameter edits. Reads component .py, finds UPPERCASE parameter assignments at the top, overrides with values from `--params` JSON, executes, exports. Simple string substitution — reliable because the parameter convention is enforced by the system prompt.
+For zero-Claude parameter edits. Runs the component .py in a modified Python namespace with overridden parameter values injected into `globals()` before the script runs. This approach (rather than string substitution) correctly handles:
+- Computed/derived parameters (e.g., `INNER_DIAMETER = OUTER_DIAMETER - 2 * WALL_THICKNESS`) — these are re-evaluated with the new values
+- Any value type (float, int, string, bool)
+- Multiline expressions
+
+The pattern is already established in `builder.py` which uses sandboxed script evaluation. The `--params` JSON specifies only the overridden values; all other parameters retain their defaults from the source file.
 
 ## Claude Integration & Token Optimization
 
@@ -338,11 +366,17 @@ Each prompt is self-contained — no reliance on conversation history from prior
 | Assembly | System prompt + component list + spatial relationships | ~400-800 |
 | Refinement | System prompt + component spec + current code + feedback | ~500-1200 |
 
-### Session ID strategy
+### Session ID lifecycle
 
-- **No `--resume` across phases.** Each phase starts fresh with only what it needs.
-- **Keep `--resume` within a phase** for multi-turn refinement of a single component. Reset when moving to next component.
-- Conversation history managed by us in `session.json`, not by Claude's session memory.
+Each Claude CLI invocation may produce a `session_id`. These are managed per-scope, not globally:
+
+- **Phase-level sessions:** Spec and Decompose phases each get their own `session_id`. Stored in `session.json` as `claude_sessions.spec` and `claude_sessions.decompose`.
+- **Component-level sessions:** Each component gets its own `session_id` during the Component phase. Stored as `claude_sessions.components.<component_id>`. This enables `--resume` for multi-turn feedback within a single component.
+- **No `--resume` across phases or components.** Moving from Decompose to Component, or from one component to the next, starts a fresh Claude session with only the relevant context.
+- **Backward navigation:** Jumping back to an already-approved component creates a new `session_id` for that component (the old one is discarded). This avoids stale context from the previous approval cycle.
+- **Session expiry:** If a stored `session_id` has expired on Claude's side, the system detects the failure and starts a fresh session transparently, logging a warning to the user.
+
+Conversation history is managed by us in `session.json`, not by Claude's session memory. The `session_id` is purely an optimization to maintain context within a single component's refinement cycle.
 
 ### No-Claude fast paths
 
@@ -351,6 +385,10 @@ These operations never call Claude:
 2. Undo → restore previous component file → rebuild
 3. Re-assembly after component update → re-run assembly.py
 4. Export individual component STL/STEP
+
+## Migration from Existing Sessions
+
+The new file structure (`components/`, `assembly/`, `spec.toml`) is incompatible with the current flat structure (`iter_NNN.py`/`iter_NNN.stl`). Existing `~/MiModel/` sessions created before this redesign are treated as **read-only legacy sessions**: they appear in the project tree and their conversation/models can be viewed, but they cannot be edited or refined under the new phase machine. New sessions created after the update use the new structure exclusively. No automated migration is attempted.
 
 ## Error Handling & Recovery
 
