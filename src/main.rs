@@ -76,6 +76,8 @@ struct App<'a> {
     // App state
     should_quit: bool,
     spinner_frame: usize,
+    /// Timestamp of last Ctrl+C press (for double-tap quit)
+    last_ctrl_c: Option<std::time::Instant>,
 
     // Session creation flags
     new_session_pending: bool,
@@ -148,6 +150,7 @@ impl<'a> App<'a> {
             active_session_dir: None,
             should_quit: false,
             spinner_frame: 0,
+            last_ctrl_c: None,
             new_session_pending: false,
             new_project_pending: false,
             export_pending: false,
@@ -367,10 +370,22 @@ impl<'a> App<'a> {
                         self.conversation.add("system", "(cancelled)");
                         self.busy = BusyState::Idle;
                     }
+                    self.last_ctrl_c = None;
                 } else {
-                    // Quit when idle
-                    self.cleanup();
-                    self.should_quit = true;
+                    // Double Ctrl+C to quit
+                    let now = std::time::Instant::now();
+                    if let Some(last) = self.last_ctrl_c {
+                        if now.duration_since(last).as_millis() < 500 {
+                            self.cleanup();
+                            self.should_quit = true;
+                        } else {
+                            self.last_ctrl_c = Some(now);
+                            self.conversation.add("system", "Press Ctrl+C again to quit.");
+                        }
+                    } else {
+                        self.last_ctrl_c = Some(now);
+                        self.conversation.add("system", "Press Ctrl+C again to quit.");
+                    }
                 }
                 return;
             }
@@ -781,6 +796,12 @@ impl<'a> App<'a> {
 
         // Extract attachment paths (images + PDFs) from text
         let (clean_text, mut extracted_images) = image::extract_attachment_paths(&text);
+        // Show confirmation for files detected from typed/pasted paths
+        for path in &extracted_images {
+            let kind = if image::is_pdf(path) { "PDF" } else { "image" };
+            let size_kb = std::fs::metadata(path).map(|m| m.len() / 1024).unwrap_or(0);
+            self.conversation.add("system", &format!("Attached {kind} ({size_kb}KB): {}", path.display()));
+        }
         extracted_images.extend(self.pending_images.drain(..));
         self.model_panel.pending_files.clear();
         let all_images = extracted_images;
@@ -1167,6 +1188,7 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         active_session_dir: None,
         should_quit: false,
         spinner_frame: 0,
+        last_ctrl_c: None,
         new_session_pending: false,
         new_project_pending: false,
         export_pending: false,
