@@ -1,3 +1,4 @@
+mod assembly;
 mod claude;
 mod component;
 mod config;
@@ -954,6 +955,10 @@ impl<'a> App<'a> {
                 }
                 return;
             }
+            Phase::Assembly => {
+                self.handle_assembly_input(&clean_text);
+                return;
+            }
             // For other phases, fall through to existing monolithic path (for now)
             _ => {}
         }
@@ -1197,6 +1202,17 @@ impl<'a> App<'a> {
                                     self.handle_component_build_result(build_result, code_block.code);
                                 } else {
                                     // No code in response — just a conversation message
+                                    self.busy = BusyState::Idle;
+                                }
+                            }
+                            Phase::Assembly => {
+                                // Assembly responses may contain code to rebuild, or just conversation
+                                let parsed = parser::parse_response(&response);
+                                if let Some(code_block) = parsed.code {
+                                    self.busy = BusyState::Building;
+                                    let result = self.session.build(&code_block.code, code_block.engine);
+                                    self.handle_build_result(result);
+                                } else {
                                     self.busy = BusyState::Idle;
                                 }
                             }
@@ -1495,9 +1511,57 @@ impl<'a> App<'a> {
         // Will be implemented in Chunk 6: send decompose prompt, parse component tree
     }
 
-    #[allow(dead_code)]
-    fn handle_assembly_input(&mut self, _text: &str) {
-        // Will be implemented in Chunk 8: send assembly prompt, combine STLs
+    fn handle_assembly_input(&mut self, text: &str) {
+        let trimmed = text.trim().to_lowercase();
+        if trimmed == "approve" || trimmed == "ok" || trimmed == "done" {
+            // Approve assembly, move to Refinement
+            self.conversation.add("system", "Assembly approved! Transitioning to Refinement phase.");
+            self.phase = Phase::Refinement;
+            self.layout_config.phase = Phase::Refinement;
+            self.claude_session_id = None;
+        } else {
+            // Send feedback about assembly to Claude
+            self.send_assembly_feedback(text);
+        }
+    }
+
+    fn send_assembly_feedback(&mut self, text: &str) {
+        self.busy = BusyState::Thinking;
+        self.streaming_text.clear();
+
+        let model = self.claude_model.clone();
+        let session_id = self.claude_session_id.clone();
+        let tx = self.bg_tx.clone();
+        let stream_tx = self.stream_tx.clone();
+        let bg_pid = Arc::clone(&self.bg_pid);
+        let prompt = text.to_string();
+
+        std::thread::spawn(move || {
+            let result = claude::send_with_phase_prompt(
+                &model,
+                "assembly",
+                session_id.as_deref(),
+                &prompt,
+                &[],
+                Some(&stream_tx),
+                Some(&bg_pid),
+            );
+            bg_pid.store(0, Ordering::SeqCst);
+            match result {
+                Ok((response, new_sid)) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Ok(response),
+                        session_id: new_sid.or(session_id),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundResult::ClaudeResponse {
+                        result: Err(e),
+                        session_id: None,
+                    });
+                }
+            }
+        });
     }
 
     #[allow(dead_code)]
@@ -1647,6 +1711,12 @@ impl<'a> App<'a> {
         if total == 0 {
             self.conversation.add("system", "No components to approve.");
             return;
+        }
+
+        // Trigger progressive assembly note if we have 2+ approved components
+        // (current is 0-indexed, so current >= 1 means at least 2 approved)
+        if current >= 1 {
+            self.conversation.add("system", "Progressive assembly updated.");
         }
 
         if current + 1 < total {
