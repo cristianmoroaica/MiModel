@@ -153,7 +153,7 @@ Key properties:
 3. f3d shows the component
 4. Assembly auto-updates (progressive)
 5. User approves or gives feedback
-6. On approve: component saved to library, move to next per assembly order
+6. On approve: component saved to `components/<id>/`, move to next per assembly order
 7. On feedback: Claude regenerates with scoped context (current code + feedback only)
 
 **Output:** `<component_id>.py`, `<component_id>.stl`, `<component_id>.step`, `<component_id>.json`
