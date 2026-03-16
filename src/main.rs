@@ -62,6 +62,9 @@ struct App<'a> {
     // Background channels
     bg_tx: mpsc::Sender<BackgroundResult>,
     bg_rx: mpsc::Receiver<BackgroundResult>,
+    /// Channel for streaming text chunks from Claude
+    stream_rx: mpsc::Receiver<String>,
+    stream_tx: mpsc::Sender<String>,
     bg_pid: Arc<AtomicU32>,
 
     // Storage
@@ -82,6 +85,8 @@ struct App<'a> {
     rename_pending: Option<RenameTarget>,
     delete_pending: Option<DeleteTarget>,
     save_part_pending: bool,
+    /// Accumulates streaming text from Claude during Thinking state
+    streaming_text: String,
     build_timeout: u64,
 }
 
@@ -108,6 +113,7 @@ impl<'a> App<'a> {
 
         // Setup background channel
         let (bg_tx, bg_rx) = mpsc::channel::<BackgroundResult>();
+        let (stream_tx, stream_rx) = mpsc::channel::<String>();
         let bg_pid = Arc::new(AtomicU32::new(0));
 
         let mut project_tree = ProjectTreePane::new();
@@ -133,6 +139,8 @@ impl<'a> App<'a> {
             python_path,
             bg_tx,
             bg_rx,
+            stream_tx,
+            stream_rx,
             bg_pid,
             projects,
             active_project_idx: None,
@@ -146,6 +154,7 @@ impl<'a> App<'a> {
             rename_pending: None,
             delete_pending: None,
             save_part_pending: false,
+            streaming_text: String::new(),
             build_timeout,
         })
     }
@@ -175,16 +184,22 @@ impl<'a> App<'a> {
             scroll_offset: self.conversation.scroll_offset,
             auto_scroll: self.conversation.auto_scroll,
         };
-        // Add spinner entry if busy
+        // Show streaming text or spinner when busy
         if self.busy != BusyState::Idle {
             let spinner_char = SPINNER[self.spinner_frame % SPINNER.len()];
             let msg = match self.busy {
-                BusyState::Thinking => format!("{spinner_char} Thinking..."),
+                BusyState::Thinking => {
+                    if self.streaming_text.is_empty() {
+                        format!("{spinner_char} Thinking...")
+                    } else {
+                        format!("{spinner_char} {}", self.streaming_text)
+                    }
+                }
                 BusyState::Building => format!("{spinner_char} Building..."),
                 BusyState::Idle => unreachable!(),
             };
             conv.entries.push(crate::tui::conversation::ConversationEntry {
-                role: "system".to_string(),
+                role: if self.streaming_text.is_empty() { "system" } else { "assistant" }.to_string(),
                 content: msg,
             });
         }
@@ -494,13 +509,18 @@ impl<'a> App<'a> {
                             self.conversation.add("system", "Next prompt will create a new project.");
                         } else {
                             // Toggle project expansion
-                            self.project_tree.active_project = if self.project_tree.active_project == Some(project_idx) {
-                                None
-                            } else {
+                            let expanding = self.project_tree.active_project != Some(project_idx);
+                            self.project_tree.active_project = if expanding {
                                 Some(project_idx)
+                            } else {
+                                None
                             };
                             let projects = self.projects.clone();
                             self.project_tree.refresh(&projects);
+
+                            if expanding {
+                                self.open_project(project_idx);
+                            }
                         }
                     } else if let Some(ref name) = session_name {
                         // Load session
@@ -681,23 +701,25 @@ impl<'a> App<'a> {
 
         // Set busy state
         self.busy = BusyState::Thinking;
+        self.streaming_text.clear();
 
         // Clone what we need for the background thread
         let model = self.claude_model.clone();
         let system_prompt = self.claude_system_prompt.clone();
         let session_id = self.claude_session_id.clone();
         let tx = self.bg_tx.clone();
+        let stream_tx = self.stream_tx.clone();
         let bg_pid = Arc::clone(&self.bg_pid);
 
         std::thread::spawn(move || {
-            // Unfortunately send_prompt uses Command internally and we can't get PID
-            // We just call it directly
             let result = claude::send_prompt(
                 &model,
                 &system_prompt,
                 session_id.as_deref(),
                 &clean_text,
                 &all_images,
+                Some(&stream_tx),
+                Some(&bg_pid),
             );
             bg_pid.store(0, Ordering::SeqCst);
             match result {
@@ -857,10 +879,102 @@ impl<'a> App<'a> {
         }
     }
 
+    fn open_project(&mut self, project_idx: usize) {
+        if let Some(project) = self.projects.get(project_idx) {
+            // Set active project so new prompts land here
+            self.active_project_idx = Some(project_idx);
+            self.active_session_name = None;
+            self.active_session_dir = None;
+            self.claude_session_id = None;
+
+            // Reset session state
+            self.session.reset();
+            self.conversation.clear();
+            self.model_panel.clear();
+
+            // Show project info
+            let name = &project.meta.name;
+            let desc = if project.meta.description.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", project.meta.description)
+            };
+            self.conversation.add("system", &format!("Project: {name}{desc}"));
+
+            // List sessions with status
+            if project.sessions.is_empty() {
+                self.conversation.add("system", "No sessions yet. Type a prompt to start building.");
+            } else {
+                let mut session_info = String::from("Sessions:");
+                for sname in &project.sessions {
+                    let session_path = project.path.join(sname);
+                    let status = storage::session::session_status(&session_path);
+                    let detail = match status {
+                        storage::session::SessionStatus::Ok { iteration_count, modified } => {
+                            let date = modified.split('T').next().unwrap_or(&modified);
+                            format!("  {sname}  ({iteration_count} iterations, {date})")
+                        }
+                        storage::session::SessionStatus::Empty => {
+                            format!("  {sname}  (empty)")
+                        }
+                        storage::session::SessionStatus::Corrupted => {
+                            format!("  {sname}  (corrupted)")
+                        }
+                    };
+                    session_info.push_str(&format!("\n{detail}"));
+                }
+                self.conversation.add("system", &session_info);
+            }
+
+            // Check for saved parts (.stl files in project root)
+            let mut parts: Vec<String> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&project.path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("stl") {
+                        if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
+                            parts.push(name.to_string());
+                        }
+                    }
+                }
+            }
+            if !parts.is_empty() {
+                parts.sort();
+                let parts_list = parts.iter().map(|p| format!("  {p}.stl")).collect::<Vec<_>>().join("\n");
+                self.conversation.add("system", &format!("Saved parts:\n{parts_list}"));
+            }
+
+            // Check for documentation files
+            let doc_names = ["README.md", "readme.md", "NOTES.md", "notes.md", "notes.txt", "docs.md"];
+            for doc_name in &doc_names {
+                let doc_path = project.path.join(doc_name);
+                if doc_path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&doc_path) {
+                        let preview: String = content.lines().take(20).collect::<Vec<_>>().join("\n");
+                        self.conversation.add("system", &format!("{doc_name}:\n{preview}"));
+                    }
+                }
+            }
+
+            self.focus = Focus::Input;
+        }
+    }
+
     fn refresh_projects(&mut self) {
         self.projects = storage::project::list_projects().unwrap_or_default();
         let projects = self.projects.clone();
         self.project_tree.refresh(&projects);
+    }
+
+    /// Kill any running Claude subprocess on app exit.
+    fn cleanup(&self) {
+        let pid = self.bg_pid.load(Ordering::SeqCst);
+        if pid != 0 {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+        }
     }
 }
 
@@ -914,6 +1028,7 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
     let python_path = config.python_path();
     let projects = storage::project::list_projects().unwrap_or_default();
     let (bg_tx, bg_rx) = mpsc::channel::<BackgroundResult>();
+    let (stream_tx, stream_rx) = mpsc::channel::<String>();
     let mut pt = ProjectTreePane::new();
     pt.refresh(&projects);
     App {
@@ -933,6 +1048,8 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         python_path,
         bg_tx,
         bg_rx,
+        stream_tx,
+        stream_rx,
         bg_pid: Arc::new(AtomicU32::new(0)),
         projects,
         active_project_idx: None,
@@ -946,6 +1063,7 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         rename_pending: None,
         delete_pending: None,
         save_part_pending: false,
+        streaming_text: String::new(),
         build_timeout: 60,
     }
 }
@@ -969,6 +1087,9 @@ fn main() {
     // Run event loop
     let result = run_event_loop(&mut terminal, &mut app);
 
+    // Kill any running Claude subprocess before exiting
+    app.cleanup();
+
     // Restore terminal
     ratatui::restore();
 
@@ -985,8 +1106,14 @@ fn run_event_loop(
     loop {
         terminal.draw(|f| app.render(f))?;
 
-        // Check background channel
+        // Drain streaming text chunks from Claude
+        while let Ok(chunk) = app.stream_rx.try_recv() {
+            app.streaming_text.push_str(&chunk);
+        }
+
+        // Check background channel (final result)
         if let Ok(result) = app.bg_rx.try_recv() {
+            app.streaming_text.clear();
             app.handle_bg_result(result);
         }
 

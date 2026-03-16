@@ -50,6 +50,9 @@ struct ClaudeJsonOutput {
     #[serde(rename = "type")]
     #[serde(default)]
     event_type: Option<String>,
+    /// For assistant events, contains {"content": [{"text": "..."}]}
+    #[serde(default)]
+    message: Option<serde_json::Value>,
 }
 
 pub struct ClaudeClient {
@@ -81,6 +84,8 @@ impl ClaudeClient {
             self.session_id.as_deref(),
             prompt,
             image_paths,
+            None,
+            None,
         )?;
         if let Some(sid) = new_sid {
             self.session_id = Some(sid);
@@ -114,14 +119,18 @@ impl ClaudeClient {
 ///   a new session and returns its ID in the response.
 /// - Subsequent calls: pass the captured `session_id` with `--resume`; the
 ///   `system_prompt` is ignored.
+/// Send a prompt to Claude CLI with streaming. Text chunks are sent via
+/// `on_text` as they arrive so the TUI can display them live.
+/// Returns `(full_response_text, captured_session_id)` when complete.
 pub fn send_prompt(
     model: &Option<String>,
     system_prompt: &str,
     session_id: Option<&str>,
     prompt: &str,
     image_paths: &[PathBuf],
+    on_text: Option<&std::sync::mpsc::Sender<String>>,
+    pid_out: Option<&std::sync::Arc<std::sync::atomic::AtomicU32>>,
 ) -> Result<(String, Option<String>), String> {
-    // Build the full prompt — if files are attached, tell claude about them
     let full_prompt = if image_paths.is_empty() {
         prompt.to_string()
     } else {
@@ -139,7 +148,7 @@ pub fn send_prompt(
     cmd.arg("--dangerously-skip-permissions")
         .arg("-p")
         .arg(&full_prompt)
-        .arg("--output-format").arg("json")
+        .arg("--output-format").arg("stream-json")
         .env_remove("ANTHROPIC_API_KEY")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -148,7 +157,6 @@ pub fn send_prompt(
         cmd.arg("--model").arg(m);
     }
 
-    // Grant access to directories containing images
     for path in image_paths {
         if let Some(parent) = path.parent() {
             cmd.arg("--add-dir").arg(parent);
@@ -161,60 +169,97 @@ pub fn send_prompt(
         cmd.arg("--system-prompt").arg(system_prompt);
     }
 
-    let output = cmd.output()
+    let mut child = cmd.spawn()
         .map_err(|e| format!("Failed to run claude: {e}. Is claude CLI installed?"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Store PID so the process can be killed on app exit or Ctrl+C
+    if let Some(pid_arc) = pid_out {
+        pid_arc.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+    }
 
-    // Try parsing JSON from stdout first (claude may output JSON even on error)
-    // If stdout is empty, try stderr (some versions write JSON there)
-    let json_source = if stdout.trim().starts_with('[') {
-        &stdout
-    } else if stderr.trim().starts_with('[') {
-        &stderr
-    } else if !output.status.success() {
-        let msg = if !stderr.trim().is_empty() {
-            stderr.trim().to_string()
-        } else if !stdout.trim().is_empty() {
-            stdout.trim().to_string()
-        } else {
-            format!("claude exited with {} (no output)", output.status)
-        };
-        return Err(msg);
-    } else {
-        return Err("No output from claude".to_string());
-    };
+    let stdout = child.stdout.take()
+        .ok_or("Failed to capture claude stdout")?;
 
-    let events: Vec<ClaudeJsonOutput> = serde_json::from_str(json_source)
-        .map_err(|e| format!("Failed to parse claude output: {e}"))?;
+    // Read stream-json line by line
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(stdout);
 
-    // Capture session_id from the first event that has one
+    let mut full_text = String::new();
     let mut captured_session_id: Option<String> = None;
-    if session_id.is_none() {
-        for event in &events {
+    let mut last_assistant_text = String::new();
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() { continue; }
+
+        let event: ClaudeJsonOutput = match serde_json::from_str(&line) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        // Capture session_id from any event
+        if captured_session_id.is_none() {
             if let Some(ref sid) = event.session_id {
                 if !sid.is_empty() {
                     captured_session_id = Some(sid.clone());
-                    break;
                 }
             }
         }
-    }
 
-    // Find the result event
-    for event in &events {
+        // Extract text from assistant messages
+        if event.event_type.as_deref() == Some("assistant") {
+            if let Some(ref msg) = event.message {
+                if let Some(content) = msg.get("content") {
+                    if let Some(arr) = content.as_array() {
+                        let mut new_text = String::new();
+                        for block in arr {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                new_text.push_str(text);
+                            }
+                        }
+                        // Send only the new delta
+                        if new_text.len() > last_assistant_text.len() {
+                            let delta = &new_text[last_assistant_text.len()..];
+                            if let Some(tx) = on_text {
+                                let _ = tx.send(delta.to_string());
+                            }
+                        }
+                        last_assistant_text = new_text;
+                    }
+                }
+            }
+        }
+
+        // Result event = final
         if event.event_type.as_deref() == Some("result") {
             if event.is_error == Some(true) {
                 return Err(event.result.clone().unwrap_or("Unknown error".to_string()));
             }
             if let Some(ref result) = event.result {
-                return Ok((result.clone(), captured_session_id));
+                full_text = result.clone();
             }
         }
     }
 
-    Err("No result in claude output".to_string())
+    let _ = child.wait();
+
+    // Clear PID after process exits
+    if let Some(pid_arc) = pid_out {
+        pid_arc.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    if full_text.is_empty() && !last_assistant_text.is_empty() {
+        full_text = last_assistant_text;
+    }
+
+    if full_text.is_empty() {
+        return Err("No response from claude".to_string());
+    }
+
+    Ok((full_text, captured_session_id))
 }
 
 /// Check that the claude CLI is available.
@@ -254,7 +299,11 @@ mod tests {
     fn test_send_prompt_signature() {
         // Verify send_prompt compiles with the correct signature.
         // We don't call it (would need a live claude instance) but verify it exists.
-        let _: fn(&Option<String>, &str, Option<&str>, &str, &[PathBuf]) -> Result<(String, Option<String>), String> = send_prompt;
+        let _: fn(
+            &Option<String>, &str, Option<&str>, &str, &[PathBuf],
+            Option<&std::sync::mpsc::Sender<String>>,
+            Option<&std::sync::Arc<std::sync::atomic::AtomicU32>>,
+        ) -> Result<(String, Option<String>), String> = send_prompt;
     }
 
     #[test]
