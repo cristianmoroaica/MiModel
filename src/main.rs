@@ -24,6 +24,9 @@ use crate::tui::input_bar::InputBar;
 use crate::tui::conversation::ConversationPane;
 use crate::tui::project_tree::ProjectTreePane;
 use crate::tui::model_panel::ModelPanel;
+use crate::tui::spec_panel::SpecPanel;
+use crate::tui::component_tree::ComponentTreePanel;
+use crate::tui::component_list::ComponentListPanel;
 use crate::viewer::Viewer;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -55,6 +58,9 @@ struct App<'a> {
     conversation: ConversationPane,
     model_panel: ModelPanel,
     input_bar: InputBar<'a>,
+    spec_panel: SpecPanel,
+    component_tree_panel: ComponentTreePanel,
+    component_list: ComponentListPanel,
 
     // Backend
     session: Session,
@@ -139,6 +145,9 @@ impl<'a> App<'a> {
             conversation: ConversationPane::new(),
             model_panel: ModelPanel::new(),
             input_bar: InputBar::new(),
+            spec_panel: SpecPanel::new(),
+            component_tree_panel: ComponentTreePanel::new(),
+            component_list: ComponentListPanel::new(),
             session,
             claude_model: config.claude.model,
             claude_system_prompt,
@@ -180,11 +189,20 @@ impl<'a> App<'a> {
             return;
         }
 
+        // Keep layout phase in sync with app phase
+        self.layout_config.phase = self.phase;
         let panes = compute_layout(area, &self.layout_config);
 
-        // Render project tree if visible
-        if let Some(tree_area) = panes.left_panel {
-            self.project_tree.render(frame, tree_area, self.focus == Focus::ProjectTree);
+        // Render left panel (phase-aware)
+        if let Some(left_area) = panes.left_panel {
+            match self.phase {
+                Phase::Spec | Phase::Decompose => {
+                    self.project_tree.render(frame, left_area, self.focus == Focus::ProjectTree);
+                }
+                Phase::Component | Phase::Assembly | Phase::Refinement => {
+                    self.component_list.render(frame, left_area, self.focus == Focus::ProjectTree);
+                }
+            }
         }
 
         // Render conversation with spinner if busy
@@ -218,9 +236,19 @@ impl<'a> App<'a> {
         // Write the clamped scroll back so scroll_up() works from a real position
         self.conversation.scroll_offset = self.conversation.scroll_offset.min(max_scroll);
 
-        // Render model panel if visible
-        if let Some(panel_area) = panes.right_panel {
-            self.model_panel.render(frame, panel_area, false);
+        // Render right panel (phase-aware)
+        if let Some(right_area) = panes.right_panel {
+            match self.phase {
+                Phase::Spec => {
+                    self.spec_panel.render(frame, right_area, false);
+                }
+                Phase::Decompose => {
+                    self.component_tree_panel.render(frame, right_area, false);
+                }
+                Phase::Component | Phase::Assembly | Phase::Refinement => {
+                    self.model_panel.render(frame, right_area, false);
+                }
+            }
         }
 
         // Render input bar with status indicators
@@ -328,12 +356,27 @@ impl<'a> App<'a> {
 
     /// Build phase indicator spans for the legend bar.
     /// Shows: " Spec ● ○ ○ ○ ○ " with the current phase filled.
+    /// During Component phase, also shows progress like "Component 2/5: Case Body".
     fn phase_indicator_spans(&self) -> Vec<Span<'static>> {
         let mut spans = Vec::new();
         let current_idx = self.phase.index();
 
-        // Phase label
-        let label = format!(" {} ", self.phase.label());
+        // Phase label — with component progress when applicable
+        let label = match self.phase {
+            Phase::Component => {
+                let total = self.component_list.len();
+                if total > 0 {
+                    let current = self.component_list.selected() + 1;
+                    let name = self.component_list.selected_id()
+                        .unwrap_or("?")
+                        .to_string();
+                    format!(" {} {}/{}: {} ", self.phase.label(), current, total, name)
+                } else {
+                    format!(" {} ", self.phase.label())
+                }
+            }
+            _ => format!(" {} ", self.phase.label()),
+        };
         spans.push(Span::styled(label, Style::default().fg(Color::White).bold()));
 
         // Phase dots
@@ -1253,6 +1296,9 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         conversation: ConversationPane::new(),
         model_panel: ModelPanel::new(),
         input_bar: InputBar::new(),
+        spec_panel: SpecPanel::new(),
+        component_tree_panel: ComponentTreePanel::new(),
+        component_list: ComponentListPanel::new(),
         session: Session::new(60, python_path.clone()),
         claude_model: config.claude.model.clone(),
         claude_system_prompt: String::new(),
