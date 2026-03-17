@@ -72,11 +72,16 @@ impl ConversationPane {
 
     /// Render the conversation into the given area. Returns max_scroll for clamping.
     pub fn render(&self, frame: &mut Frame, area: Rect, focused: bool) -> u16 {
-        let border_color = if focused { Color::Cyan } else { Color::DarkGray };
+        let border_color = if focused {
+            Color::Rgb(137, 180, 250) // Catppuccin blue
+        } else {
+            Color::Rgb(49, 50, 68) // Subtle border
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
-            .title(" Conversation ");
+            .title_style(Style::default().fg(Color::Rgb(147, 153, 178)))
+            .border_type(ratatui::widgets::BorderType::Rounded);
 
         // Build styled text
         let mut lines: Vec<Line> = Vec::new();
@@ -84,16 +89,18 @@ impl ConversationPane {
             match entry.role.as_str() {
                 "user" => {
                     lines.push(Line::from(vec![
-                        Span::styled("you: ", Style::default().fg(Color::Green).bold()),
+                        Span::styled("you ", Style::default().fg(Color::Rgb(166, 227, 161)).bold()),
                     ]));
                     for line in entry.content.lines() {
-                        lines.push(Line::from(vec![Span::raw(format!("  {line}"))]));
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("  {line}"), Style::default().fg(Color::Rgb(205, 214, 244))),
+                        ]));
                     }
-                    lines.push(Line::raw("")); // blank separator
+                    lines.push(Line::raw(""));
                 }
                 "assistant" => {
                     lines.push(Line::from(vec![
-                        Span::styled("claude: ", Style::default().fg(Color::Magenta).bold()),
+                        Span::styled("claude ", Style::default().fg(Color::Rgb(203, 166, 247)).bold()),
                     ]));
                     let md_lines = render_markdown_lines(&entry.content);
                     for ml in md_lines {
@@ -105,15 +112,20 @@ impl ConversationPane {
                     lines.push(Line::raw("")); // blank separator
                 }
                 "system" | _ => {
-                    // Compact banner style — single line, dim, with info icon
+                    // Compact banner style — dim, subtle
+                    let content = entry.content.replace('\n', " ");
+                    let truncated = if content.len() > 120 {
+                        format!("{}…", &content[..120])
+                    } else {
+                        content
+                    };
                     lines.push(Line::from(vec![
-                        Span::styled("  \u{24d8} ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("  › ", Style::default().fg(Color::Rgb(88, 91, 112))),
                         Span::styled(
-                            entry.content.replace('\n', " "), // flatten to single line
-                            Style::default().fg(Color::DarkGray).italic(),
+                            truncated,
+                            Style::default().fg(Color::Rgb(108, 112, 134)).italic(),
                         ),
                     ]));
-                    // No blank separator after system messages
                 }
             }
         }
@@ -194,7 +206,7 @@ pub fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
                     current.clear();
                 }
                 let code_text: String = chars[i + 1..close].iter().collect();
-                spans.push(Span::styled(code_text, Style::default().fg(Color::Yellow)));
+                spans.push(Span::styled(code_text, Style::default().fg(Color::Rgb(250, 179, 135))));
                 i = close + 1;
                 continue;
             }
@@ -264,7 +276,7 @@ mod tests {
         assert_eq!(spans[1].content, "foo");
         assert_eq!(
             spans[1].style.fg,
-            Some(Color::Yellow),
+            Some(Color::Rgb(250, 179, 135)),
             "middle span should be yellow"
         );
         assert_eq!(spans[2].content, " here");

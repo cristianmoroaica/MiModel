@@ -88,18 +88,15 @@ impl RightPanel {
         }
 
         let border_style = if focused {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(Color::Rgb(137, 180, 250))
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(Color::Rgb(49, 50, 68))
         };
 
-        // Split: 1 line for tab bar (inside block border means we need the outer block first),
-        // then content. We render the whole thing inside a bordered block.
-        // Layout: top border + 1 line tabs + content + bottom border.
-        // Use a block for the outer frame and split the inner area.
         let outer_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(border_style);
+            .border_style(border_style)
+            .border_type(ratatui::widgets::BorderType::Rounded);
 
         let inner = outer_block.inner(area);
         frame.render_widget(outer_block, area);
@@ -127,16 +124,14 @@ impl RightPanel {
             Line::from(" Model "),
         ];
 
-        let highlight_style = if focused {
-            Style::default().fg(Color::Black).bg(Color::Cyan).bold()
-        } else {
-            Style::default().fg(Color::Black).bg(Color::DarkGray)
-        };
+        let highlight_style = Style::default().fg(Color::Rgb(249, 226, 175)).bold();
+        let normal_style = Style::default().fg(Color::Rgb(88, 91, 112));
 
         let tabs = Tabs::new(titles)
             .select(self.active_tab.index())
+            .style(normal_style)
             .highlight_style(highlight_style)
-            .divider("|");
+            .divider("│");
 
         frame.render_widget(tabs, tab_area);
 
@@ -166,6 +161,7 @@ impl RightPanel {
         };
 
         let paragraph = Paragraph::new(content)
+            .style(Style::default().fg(Color::Rgb(147, 153, 178)))
             .wrap(Wrap { trim: false })
             .scroll((self.scroll_offset, 0));
 

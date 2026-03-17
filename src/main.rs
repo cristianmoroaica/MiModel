@@ -263,7 +263,11 @@ impl<'a> App<'a> {
         // Render input bar with status indicators
         let bar_area = panes.input_bar;
         let input_focused = self.focus == Focus::Input;
-        let border_color = if input_focused { Color::Cyan } else { Color::DarkGray };
+        let border_color = if input_focused {
+            Color::Rgb(137, 180, 250)
+        } else {
+            Color::Rgb(49, 50, 68)
+        };
 
         // Build input bar title with status indicators
         let mut title_spans: Vec<Span> = vec![Span::raw(" Input ")];
@@ -279,14 +283,14 @@ impl<'a> App<'a> {
             if img_count > 0 {
                 title_spans.push(Span::styled(
                     format!(" {img_count} img "),
-                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                    Style::default().fg(Color::Rgb(30, 30, 46)).bg(Color::Rgb(148, 226, 213)),
                 ));
                 title_spans.push(Span::raw(" "));
             }
             if pdf_count > 0 {
                 title_spans.push(Span::styled(
                     format!(" {pdf_count} pdf "),
-                    Style::default().fg(Color::Black).bg(Color::Yellow),
+                    Style::default().fg(Color::Rgb(30, 30, 46)).bg(Color::Rgb(249, 226, 175)),
                 ));
                 title_spans.push(Span::raw(" "));
             }
@@ -295,22 +299,24 @@ impl<'a> App<'a> {
         // Busy indicator
         if self.claude.busy != BusyState::Idle {
             let spinner_char = SPINNER[self.spinner_frame % SPINNER.len()];
-            let (label, color) = match self.claude.busy {
-                BusyState::Thinking => ("Thinking", Color::Magenta),
-                BusyState::Building => ("Building", Color::Yellow),
+            let (label, fg, bg) = match self.claude.busy {
+                BusyState::Thinking => ("Thinking", Color::Rgb(30, 30, 46), Color::Rgb(203, 166, 247)),
+                BusyState::Building => ("Building", Color::Rgb(30, 30, 46), Color::Rgb(249, 226, 175)),
                 BusyState::Idle => unreachable!(),
             };
             title_spans.push(Span::styled(
                 format!(" {spinner_char} {label} "),
-                Style::default().fg(Color::Black).bg(color),
+                Style::default().fg(fg).bg(bg),
             ));
         }
 
         self.input_bar.textarea.set_block(
             ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
                 .border_style(Style::default().fg(border_color))
                 .title(Line::from(title_spans))
+                .title_style(Style::default().fg(Color::Rgb(147, 153, 178)))
         );
         frame.render_widget(&self.input_bar.textarea, bar_area);
 

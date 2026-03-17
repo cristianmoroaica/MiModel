@@ -14,11 +14,7 @@ impl<'a> InputBar<'a> {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
         textarea.set_placeholder_text("Type what you want to build...");
-        textarea.set_block(
-            ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::TOP)
-                .border_style(Style::default().fg(Color::DarkGray))
-        );
+        textarea.set_block(Self::make_block());
         Self {
             textarea,
             history: Vec::new(),
@@ -28,8 +24,11 @@ impl<'a> InputBar<'a> {
 
     fn make_block() -> ratatui::widgets::Block<'a> {
         ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::TOP)
-            .border_style(Style::default().fg(Color::DarkGray))
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Rgb(49, 50, 68)))
+            .title(" Input ")
+            .title_style(Style::default().fg(Color::Rgb(147, 153, 178)))
     }
 
     fn reset_textarea(&mut self) {
@@ -121,15 +120,34 @@ impl<'a> InputBar<'a> {
     /// Set a prefix badge (e.g. "[2 images]").
     pub fn set_badge(&mut self, badge: &str) {
         let title = if badge.is_empty() {
-            String::new()
+            " Input ".to_string()
         } else {
-            format!(" {badge} ")
+            format!(" Input · {badge} ")
         };
         self.textarea.set_block(
             ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::TOP)
-                .border_style(Style::default().fg(Color::DarkGray))
+                .borders(ratatui::widgets::Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Rgb(49, 50, 68)))
                 .title(title)
+                .title_style(Style::default().fg(Color::Rgb(147, 153, 178)))
+        );
+    }
+
+    /// Set border highlight when focused.
+    pub fn set_focused(&mut self, focused: bool) {
+        let border_color = if focused {
+            Color::Rgb(137, 180, 250)
+        } else {
+            Color::Rgb(49, 50, 68)
+        };
+        self.textarea.set_block(
+            ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(border_color))
+                .title(" Input ")
+                .title_style(Style::default().fg(Color::Rgb(147, 153, 178)))
         );
     }
 }

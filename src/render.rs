@@ -10,9 +10,6 @@ use crate::phase::Phase;
 use crate::tui::Focus;
 
 /// Build phase indicator spans for the legend bar.
-///
-/// Shows: " Spec ● ○ ○ ○ ○ " with the current phase filled.
-/// During Component phase, also shows progress like "Component 2/5: Case Body".
 pub fn phase_indicator_spans(
     phase: Phase,
     current_component_idx: Option<usize>,
@@ -22,99 +19,79 @@ pub fn phase_indicator_spans(
     let mut spans = Vec::new();
     let current_idx = phase.index();
 
-    // Phase label — with component progress when applicable
     let label = match phase {
         Phase::Component if components_len > 0 => {
             let current = current_component_idx.unwrap_or(0) + 1;
             let name = current_component_name.unwrap_or("?");
-            format!(" {} {}/{}: {} ", phase.label(), current, components_len, name)
+            format!("{} {}/{}: {}", phase.label(), current, components_len, name)
         }
-        _ => format!(" {} ", phase.label()),
+        _ => phase.label().to_string(),
     };
-    spans.push(Span::styled(label, Style::default().fg(Color::White).bold()));
+    spans.push(Span::styled(
+        format!(" {label} "),
+        Style::default().fg(Color::Rgb(249, 226, 175)).bold(),
+    ));
 
     // Phase dots
     for i in 0..5 {
-        let dot = if i == current_idx { "\u{25cf}" } else { "\u{25cb}" };
-        let style = if i == current_idx {
-            Style::default().fg(Color::Cyan)
+        let (dot, color) = if i == current_idx {
+            ("●", Color::Rgb(249, 226, 175))
+        } else if i < current_idx {
+            ("●", Color::Rgb(88, 91, 112))
         } else {
-            Style::default().fg(Color::DarkGray)
+            ("○", Color::Rgb(59, 60, 75))
         };
-        spans.push(Span::styled(format!(" {dot}"), style));
+        spans.push(Span::styled(format!(" {dot}"), Style::default().fg(color)));
     }
-    spans.push(Span::raw(" "));
+    spans.push(Span::raw("  "));
 
     spans
 }
 
 /// Render the legend/status bar at the bottom of the screen.
-///
-/// Combines phase indicators, key shortcuts, and the focus-dependent legend.
 pub fn render_legend_bar(
     frame: &mut Frame,
     area: Rect,
     focus: Focus,
     phase_spans: Vec<Span<'static>>,
 ) {
-    let mut legend_spans = phase_spans;
-    legend_spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-    legend_spans.push(Span::styled(" Alt+1-5 ", Style::default().fg(Color::Black).bg(Color::DarkGray)));
-    legend_spans.push(Span::raw(" Phase "));
-    legend_spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-    let focus_spans: Vec<Span> = match focus {
+    let key_style = Style::default().fg(Color::Rgb(147, 153, 178));
+    let label_style = Style::default().fg(Color::Rgb(88, 91, 112));
+    let sep = Span::styled(" · ", Style::default().fg(Color::Rgb(59, 60, 75)));
+
+    let mut spans = phase_spans;
+    spans.push(sep.clone());
+
+    let keys: Vec<(&str, &str)> = match focus {
         Focus::Input => vec![
-            Span::styled(" Enter ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Send "),
-            Span::styled(" PgUp/Dn ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Scroll "),
-            Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Panes "),
-            Span::styled(" Ctrl+W ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Save "),
-            Span::styled(" Ctrl+V ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Img "),
-            Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Quit "),
+            ("Enter", "Send"), ("PgUp/Dn", "Scroll"), ("Tab", "Panes"),
+            ("^W", "Save"), ("^V", "Img"), ("^C", "Quit"),
         ],
         Focus::ProjectTree => vec![
-            Span::styled(" j/k ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Navigate "),
-            Span::styled(" Enter ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Open/Expand "),
-            Span::styled(" e ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Rename "),
-            Span::styled(" d ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Delete "),
-            Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Panes "),
-            Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Quit "),
+            ("j/k", "Nav"), ("Enter", "Open"), ("l/h", "Expand"),
+            ("e", "Rename"), ("d", "Del"), ("Tab", "Panes"),
         ],
         Focus::Conversation => vec![
-            Span::styled(" j/k ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Scroll "),
-            Span::styled(" u/d ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Page "),
-            Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Panes "),
-            Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Quit "),
+            ("j/k", "Scroll"), ("u/d", "Page"), ("Tab", "Panes"), ("^C", "Quit"),
         ],
         Focus::RightPanel => vec![
-            Span::styled(" h/l ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Tabs "),
-            Span::styled(" j/k ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Scroll "),
-            Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Panes "),
-            Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-            Span::raw(" Quit "),
+            ("h/l", "Tabs"), ("j/k", "Scroll"), ("Tab", "Panes"), ("^C", "Quit"),
         ],
     };
-    legend_spans.extend(focus_spans);
-    let legend_text = Line::from(legend_spans);
-    frame.render_widget(Paragraph::new(legend_text), area);
+
+    for (i, (key, label)) in keys.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ", label_style));
+        }
+        spans.push(Span::styled((*key).to_string(), key_style));
+        spans.push(Span::styled(format!(" {label}"), label_style));
+    }
+
+    let legend = Line::from(spans);
+    frame.render_widget(
+        Paragraph::new(legend).style(Style::default().bg(Color::Rgb(24, 24, 37))),
+        area,
+    );
 }
 
 #[cfg(test)]
@@ -124,31 +101,23 @@ mod tests {
     #[test]
     fn phase_indicator_spec_phase() {
         let spans = phase_indicator_spans(Phase::Spec, None, 0, None);
-        // First span is the label
         let label_content = &spans[0].content;
         assert!(label_content.contains("Spec"), "Expected 'Spec' in label, got: {label_content}");
-        // 5 dot spans + 1 trailing space = 6 more spans
-        assert_eq!(spans.len(), 7);
     }
 
     #[test]
     fn phase_indicator_component_with_progress() {
-        let spans = phase_indicator_spans(
-            Phase::Component,
-            Some(1),
-            5,
-            Some("Case Body"),
-        );
+        let spans = phase_indicator_spans(Phase::Component, Some(1), 5, Some("Case Body"));
         let label_content = &spans[0].content;
-        assert!(label_content.contains("2/5"), "Expected '2/5' in label, got: {label_content}");
-        assert!(label_content.contains("Case Body"), "Expected 'Case Body' in label, got: {label_content}");
+        assert!(label_content.contains("2/5"));
+        assert!(label_content.contains("Case Body"));
     }
 
     #[test]
     fn phase_indicator_component_empty_list() {
         let spans = phase_indicator_spans(Phase::Component, None, 0, None);
         let label_content = &spans[0].content;
-        assert!(label_content.contains("Component"), "Expected 'Component' in label");
-        assert!(!label_content.contains('/'), "Should not show progress with 0 components");
+        assert!(label_content.contains("Component"));
+        assert!(!label_content.contains('/'));
     }
 }

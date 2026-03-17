@@ -246,30 +246,39 @@ impl ProjectTreePane {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
-        let border_color = if focused { Color::Cyan } else { Color::DarkGray };
+        let border_color = if focused {
+            Color::Rgb(137, 180, 250)
+        } else {
+            Color::Rgb(49, 50, 68)
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
+            .title_style(Style::default().fg(Color::Rgb(147, 153, 178)))
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .title(" Projects ");
 
         let items: Vec<ListItem> = self.entries.iter().map(|entry| {
-            let indent = "  ".repeat(entry.depth as usize);
+            let indent = " ".repeat(entry.depth as usize * 2);
             let style = match entry.kind {
-                TreeEntryKind::Project | TreeEntryKind::NewProject => {
-                    Style::default().fg(Color::Blue).bold()
+                TreeEntryKind::Project => {
+                    Style::default().fg(Color::Rgb(137, 180, 250)).bold() // Catppuccin blue
+                }
+                TreeEntryKind::NewProject => {
+                    Style::default().fg(Color::Rgb(88, 91, 112)) // Dim
                 }
                 TreeEntryKind::Session => {
                     if self.active_session.as_deref() == entry.session_name.as_deref() {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(Color::Rgb(249, 226, 175)) // Warm yellow
                     } else {
-                        Style::default().fg(Color::White)
+                        Style::default().fg(Color::Rgb(205, 214, 244)) // Light text
                     }
                 }
                 TreeEntryKind::File => {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::Rgb(147, 153, 178)) // Medium gray
                 }
                 TreeEntryKind::Placeholder => {
-                    Style::default().fg(Color::DarkGray).italic()
+                    Style::default().fg(Color::Rgb(88, 91, 112)).italic()
                 }
             };
             ListItem::new(format!("{indent}{}", entry.label)).style(style)
@@ -277,35 +286,29 @@ impl ProjectTreePane {
 
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::default().bg(Color::DarkGray));
+            .highlight_style(Style::default().bg(Color::Rgb(49, 50, 68)));
 
         frame.render_stateful_widget(list, area, &mut self.state);
     }
 }
 
-/// Get icon for a file based on extension.
+/// Get icon for a file based on extension — ASCII-safe, single-width chars only.
 fn file_icon(name: &str) -> &'static str {
     let ext = name.rsplit('.').next().unwrap_or("");
     match ext {
         "stl" => "◆",
         "step" | "stp" => "◇",
-        "py" => "⚙",
-        "toml" => "☰",
-        "json" => "{ }",
-        "md" | "txt" => "📄",
-        "png" | "jpg" | "jpeg" => "🖼",
-        "pdf" => "📋",
+        "py" => "»",
+        "toml" => "≡",
+        "json" => "·",
+        "md" | "txt" | "log" => "¶",
+        "png" | "jpg" | "jpeg" => "▪",
+        "pdf" => "▫",
         _ => "·",
     }
 }
 
-/// Get icon for a directory based on name.
-fn file_icon_dir(name: &str) -> &'static str {
-    match name {
-        "components" => "🔧",
-        "assembly" => "🔩",
-        "images" => "🖼",
-        "references" => "📚",
-        _ => "📁",
-    }
+/// Get icon for a directory — ASCII-safe, single-width chars only.
+fn file_icon_dir(_name: &str) -> &'static str {
+    "├"
 }
