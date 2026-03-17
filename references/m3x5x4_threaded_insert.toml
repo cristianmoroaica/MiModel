@@ -1,0 +1,23 @@
+[identity]
+name = "M3x5x4 Heat-Set Threaded Insert"
+manufacturer = "Generic"
+part_number = ""
+category = "fastener"
+created = "2026-03-17T14:00:00Z"
+updated = "2026-03-17T14:00:00Z"
+
+[dimensions]
+units = "mm"
+thread_diameter = 3.0
+outer_diameter = 5.0
+length = 4.0
+installation_hole_diameter = 4.0
+installation_hole_depth = 4.5
+
+[constraints]
+pull_out_force_n = 500
+material = "brass"
+
+[sources]
+urls = []
+notes = "Standard M3 heat-set brass insert for 3D printed parts. Install with soldering iron at 200-230C."

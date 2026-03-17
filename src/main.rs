@@ -138,6 +138,7 @@ impl<'a> App<'a> {
 
         // Ensure ~/MiModel/ exists and scan for projects
         let _ = storage::project::ensure_root();
+        seed_references();
         let projects = storage::project::list_projects().unwrap_or_default();
 
         // Setup background channel
@@ -2363,6 +2364,26 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         streaming_text: String::new(),
         build_timeout: 60,
         usage_monitor: usage::UsageMonitor::new(),
+    }
+}
+
+/// Seed ~/MiModel/references/ with common components on first run.
+fn seed_references() {
+    let dir = reference::references_dir();
+    if dir.exists() && std::fs::read_dir(&dir).map(|mut d| d.next().is_some()).unwrap_or(false) {
+        return; // Already has references
+    }
+    let _ = reference::ensure_references_dir();
+
+    let seeds: &[(&str, &str)] = &[
+        ("m3_shcs.toml", include_str!("../references/m3_shcs.toml")),
+        ("m3x5x4_threaded_insert.toml", include_str!("../references/m3x5x4_threaded_insert.toml")),
+    ];
+    for (name, content) in seeds {
+        let path = dir.join(name);
+        if !path.exists() {
+            let _ = std::fs::write(&path, content);
+        }
     }
 }
 

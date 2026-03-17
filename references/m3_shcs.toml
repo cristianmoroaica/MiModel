@@ -1,0 +1,27 @@
+[identity]
+name = "M3x8 Socket Head Cap Screw"
+manufacturer = "Generic / ISO 4762"
+part_number = ""
+category = "fastener"
+created = "2026-03-17T14:00:00Z"
+updated = "2026-03-17T14:00:00Z"
+
+[dimensions]
+units = "mm"
+thread_diameter = 3.0
+thread_pitch = 0.5
+length = 8.0
+head_diameter = 5.5
+head_height = 3.0
+hex_size = 2.5
+clearance_hole = 3.4
+counterbore_diameter = 6.0
+counterbore_depth = 3.2
+
+[constraints]
+tensile_strength_mpa = 1220
+proof_load_kn = 6.78
+
+[sources]
+urls = ["https://www.iso.org/standard/11543.html"]
+notes = "ISO 4762 / DIN 912. Class 12.9 property values."
