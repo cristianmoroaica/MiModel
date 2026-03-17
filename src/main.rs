@@ -9,10 +9,12 @@ mod phase;
 mod preview;
 mod prompt_builder;
 mod python;
+mod reference;
 mod spec;
 mod stl;
 mod storage;
 mod tui;
+mod usage;
 mod viewer;
 
 use crate::config::Config;
@@ -104,6 +106,8 @@ struct App<'a> {
     /// Accumulates streaming text from Claude during Thinking state
     streaming_text: String,
     build_timeout: u64,
+    /// Claude API usage monitor (5h / 7d limits)
+    usage_monitor: usage::UsageMonitor,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +182,7 @@ impl<'a> App<'a> {
             save_part_pending: false,
             streaming_text: String::new(),
             build_timeout,
+            usage_monitor: usage::UsageMonitor::new(),
         })
     }
 
@@ -358,6 +363,11 @@ impl<'a> App<'a> {
         legend_spans.extend(focus_spans);
         let legend_text = Line::from(legend_spans);
         frame.render_widget(Paragraph::new(legend_text), legend_area);
+
+        // Render usage stats (right-aligned overlay on legend bar)
+        self.usage_monitor.maybe_refresh();
+        let usage_stats = self.usage_monitor.stats();
+        tui::status_bar::render_usage_bar(frame, legend_area, &usage_stats);
     }
 
     /// Build phase indicator spans for the legend bar.
@@ -462,6 +472,8 @@ impl<'a> App<'a> {
                     let now = std::time::Instant::now();
                     if let Some(last) = self.last_ctrl_c {
                         if now.duration_since(last).as_millis() < 500 {
+                            self.sync_conversations_to_phase_session();
+                            self.save_phase_session();
                             self.cleanup();
                             self.should_quit = true;
                         } else {
@@ -944,6 +956,10 @@ impl<'a> App<'a> {
         self.conversation.add("user", &clean_text);
         self.session.add_user_message(&clean_text);
 
+        // Sync to phase session and auto-save
+        self.sync_conversations_to_phase_session();
+        self.save_phase_session();
+
         // Phase-specific dispatch
         match self.phase {
             Phase::Spec => {
@@ -979,48 +995,8 @@ impl<'a> App<'a> {
                 self.handle_refinement_input(&clean_text);
                 return;
             }
-            // For other phases, fall through to existing monolithic path (for now)
-            _ => {}
+            // All phases are explicitly handled above — no fall-through to legacy path.
         }
-
-        // Set busy state
-        self.busy = BusyState::Thinking;
-        self.streaming_text.clear();
-
-        // Clone what we need for the background thread
-        let model = self.claude_model.clone();
-        let system_prompt = self.claude_system_prompt.clone();
-        let session_id = self.claude_session_id.clone();
-        let tx = self.bg_tx.clone();
-        let stream_tx = self.stream_tx.clone();
-        let bg_pid = Arc::clone(&self.bg_pid);
-
-        std::thread::spawn(move || {
-            let result = claude::send_prompt(
-                &model,
-                &system_prompt,
-                session_id.as_deref(),
-                &clean_text,
-                &all_images,
-                Some(&stream_tx),
-                Some(&bg_pid),
-            );
-            bg_pid.store(0, Ordering::SeqCst);
-            match result {
-                Ok((response, new_sid)) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Ok(response),
-                        session_id: new_sid.or(session_id),
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Err(e),
-                        session_id: None,
-                    });
-                }
-            }
-        });
     }
 
     fn send_spec_prompt(&mut self, text: &str, images: Vec<PathBuf>) {
@@ -1102,11 +1078,20 @@ impl<'a> App<'a> {
     }
 
     fn handle_spec_response(&mut self, response: &str) {
+        // Rail: Spec phase produces ONLY specification text, never code.
+        // Strip any code blocks that Claude may have included despite prompt instructions.
+        let parsed = parser::parse_response(response);
+        if parsed.code.is_some() {
+            self.conversation.add("system",
+                "Code block ignored — Spec phase collects requirements only. Move to Component phase to build.");
+        }
+        let clean_response = if parsed.text.is_empty() { response } else { &parsed.text };
+
         // Update spec panel with the running conversation
         let mut spec_content = self.spec_panel.content().to_string();
 
         // Check for SPEC_COMPLETE signal
-        if response.contains("SPEC_COMPLETE") {
+        if clean_response.contains("SPEC_COMPLETE") {
             self.conversation.add("system", "Specification complete! Building spec.toml...");
             self.conversation.add("system", "Transitioning to Decompose phase. You can review the spec in the right panel.");
 
@@ -1120,12 +1105,19 @@ impl<'a> App<'a> {
             if !spec_content.is_empty() {
                 spec_content.push_str("\n\n");
             }
-            spec_content.push_str(response);
+            spec_content.push_str(clean_response);
             self.spec_panel.set_content(&spec_content);
         }
     }
 
     fn handle_decompose_response(&mut self, response: &str) {
+        // Rail: Decompose phase accepts ONLY TOML component trees, never code.
+        let parsed = parser::parse_response(response);
+        if parsed.code.is_some() {
+            self.conversation.add("system",
+                "Code block ignored — Decompose phase defines component structure only.");
+        }
+
         match parser::parse_toml_response(response) {
             Ok(toml_str) => {
                 // Parse the TOML and display components in the tree panel
@@ -1134,9 +1126,9 @@ impl<'a> App<'a> {
                 self.conversation.add("system",
                     "Component tree proposed. Type 'approve' to accept, or describe changes.");
             }
-            Err(e) => {
-                self.conversation.add("system",
-                    &format!("Failed to parse component structure: {e}. Please try again."));
+            Err(_) => {
+                // No TOML found — treat as conversation (Claude asking clarifying questions)
+                // This is fine, not every decompose response needs to contain TOML.
             }
         }
     }
@@ -1205,6 +1197,10 @@ impl<'a> App<'a> {
                         self.conversation.add("assistant", &response);
                         self.session.add_assistant_message(&response);
 
+                        // Sync to phase session and auto-save
+                        self.sync_conversations_to_phase_session();
+                        self.save_phase_session();
+
                         match self.phase {
                             Phase::Spec => {
                                 self.handle_spec_response(&response);
@@ -1249,17 +1245,7 @@ impl<'a> App<'a> {
                                     self.busy = BusyState::Idle;
                                 }
                             }
-                            _ => {
-                                // Existing monolithic path: parse for code, build
-                                let parsed = parser::parse_response(&response);
-                                if let Some(code_block) = parsed.code {
-                                    self.busy = BusyState::Building;
-                                    let result = self.session.build(&code_block.code, code_block.engine);
-                                    self.handle_build_result(result);
-                                } else {
-                                    self.busy = BusyState::Idle;
-                                }
-                            }
+                            // All phases are explicitly handled above — no catch-all build path.
                         }
                     }
                     Err(e) => {
@@ -1406,8 +1392,14 @@ impl<'a> App<'a> {
                 self.phase = ps.phase;
                 self.layout_config.phase = ps.phase;
 
-                // Restore conversation (show a summary)
+                // Restore conversation from saved data
                 self.conversation.clear();
+                let phase_key = ps.phase.label().to_string();
+                if let Some(entries) = ps.conversations.get(&phase_key) {
+                    for entry in entries {
+                        self.conversation.add(&entry.role, &entry.content);
+                    }
+                }
                 self.conversation.add("system", &format!(
                     "Resumed session '{}' in {} phase.", session_name, ps.phase.label()
                 ));
@@ -1579,6 +1571,22 @@ impl<'a> App<'a> {
             unsafe {
                 libc::kill(pid as i32, libc::SIGTERM);
             }
+        }
+    }
+
+    /// Copy the in-memory conversation pane entries into the PhaseSession's
+    /// conversations map (keyed by current phase label).
+    fn sync_conversations_to_phase_session(&mut self) {
+        if let Some(ref mut ps) = self.phase_session {
+            let key = self.phase.label().to_string();
+            let entries: Vec<crate::storage::session::ConversationEntry> = self.conversation.entries
+                .iter()
+                .map(|e| crate::storage::session::ConversationEntry {
+                    role: e.role.clone(),
+                    content: e.content.clone(),
+                })
+                .collect();
+            ps.conversations.insert(key, entries);
         }
     }
 
@@ -2079,6 +2087,7 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         save_part_pending: false,
         streaming_text: String::new(),
         build_timeout: 60,
+        usage_monitor: usage::UsageMonitor::new(),
     }
 }
 
