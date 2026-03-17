@@ -1095,8 +1095,7 @@ impl<'a> App<'a> {
                     self.project_tree.active_project = Some(project_idx);
                     self.project_tree.active_session = Some(session_name.to_string());
                     self.refresh_projects();
-
-                    self.focus = Focus::Input;
+                    // Focus stays in ProjectTree — don't switch to Input
                 }
                 Err(e) => {
                     self.conversation.add("system", &format!("Failed to load session: {e}"));
@@ -1218,7 +1217,7 @@ impl<'a> App<'a> {
                 }
             }
 
-            self.focus = Focus::Input;
+            // Focus stays in ProjectTree — don't switch to Input
         }
     }
 
