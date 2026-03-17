@@ -119,19 +119,17 @@ impl ConversationPane {
                     lines.push(Line::raw("")); // blank separator
                 }
                 "system" | _ => {
-                    // Compact banner style — dim, subtle
+                    // Compact banner — errors in red tint, normal in subtle gray
                     let content = entry.content.replace('\n', " ");
-                    let truncated = if content.len() > 120 {
-                        format!("{}…", &content[..120])
+                    let is_error = content.contains("error") || content.contains("failed") || content.contains("Failed");
+                    let (prefix_color, text_color) = if is_error {
+                        (Color::Rgb(243, 139, 168), Color::Rgb(243, 139, 168)) // Red
                     } else {
-                        content
+                        (Color::Rgb(88, 91, 112), Color::Rgb(147, 153, 178)) // Visible gray
                     };
                     lines.push(Line::from(vec![
-                        Span::styled("  › ", Style::default().fg(Color::Rgb(88, 91, 112))),
-                        Span::styled(
-                            truncated,
-                            Style::default().fg(Color::Rgb(108, 112, 134)).italic(),
-                        ),
+                        Span::styled("  › ", Style::default().fg(prefix_color)),
+                        Span::styled(content, Style::default().fg(text_color)),
                     ]));
                 }
             }
