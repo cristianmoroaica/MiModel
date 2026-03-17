@@ -7,6 +7,7 @@ pub mod spec_panel;
 pub mod component_tree;
 pub mod component_list;
 pub mod param_editor;
+pub mod status_bar;
 
 /// Focus state — which pane has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -23,6 +24,10 @@ pub enum BackgroundResult {
         session_id: Option<String>,
     },
     BuildComplete(crate::python::BuildResult),
+    ReferenceResearch {
+        name: String,
+        result: Result<String, String>,
+    },
 }
 
 /// Whether a background task is running.

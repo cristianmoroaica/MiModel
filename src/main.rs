@@ -104,6 +104,8 @@ struct App<'a> {
     rename_pending: Option<RenameTarget>,
     delete_pending: Option<DeleteTarget>,
     save_part_pending: bool,
+    active_refs: Vec<String>,
+    ref_confirm_pending: Option<PendingReference>,
     /// Accumulates streaming text from Claude during Thinking state
     streaming_text: String,
     build_timeout: u64,
@@ -115,6 +117,12 @@ struct App<'a> {
 enum DeleteTarget {
     Project { project_idx: usize, name: String },
     Session { project_idx: usize, name: String },
+}
+
+#[derive(Debug, Clone)]
+struct PendingReference {
+    name: String,
+    raw_response: String,
 }
 
 impl<'a> App<'a> {
@@ -181,6 +189,8 @@ impl<'a> App<'a> {
             rename_pending: None,
             delete_pending: None,
             save_part_pending: false,
+            active_refs: Vec::new(),
+            ref_confirm_pending: None,
             streaming_text: String::new(),
             build_timeout,
             usage_monitor: usage::UsageMonitor::new(),
@@ -908,7 +918,27 @@ impl<'a> App<'a> {
             self.phase_session = None;
             self.phase = Phase::Spec;
             self.layout_config.phase = Phase::Spec;
+            self.active_refs.clear();
+            self.ref_confirm_pending = None;
             self.conversation.add("system", "New session started.");
+        }
+
+        // Handle reference save confirmation
+        if let Some(pending) = self.ref_confirm_pending.take() {
+            if text.trim().eq_ignore_ascii_case("yes") {
+                self.save_pending_reference(pending);
+            } else {
+                self.conversation.add("system", "Reference not saved.");
+            }
+            return;
+        }
+
+        // Handle /ref commands — extract attached images first since we return early
+        if text.starts_with("/ref") {
+            let (_clean, mut images) = image::extract_attachment_paths(&text);
+            images.extend(self.pending_images.drain(..));
+            self.handle_ref_command(&text, images);
+            return;
         }
 
         // Auto-create session name from first prompt if none active
@@ -997,6 +1027,159 @@ impl<'a> App<'a> {
                 return;
             }
             // All phases are explicitly handled above — no fall-through to legacy path.
+        }
+    }
+
+    fn handle_ref_command(&mut self, text: &str, attached_images: Vec<PathBuf>) {
+        let args = text.strip_prefix("/ref").unwrap_or("").trim();
+
+        if args.is_empty() || args == "list" {
+            match reference::load_library() {
+                Ok(library) if library.is_empty() => {
+                    self.conversation.add("system", "Reference library is empty.");
+                }
+                Ok(library) => {
+                    let list: Vec<String> = library.iter()
+                        .map(|(c, s)| format!("  {} — {} [{}]", s, c.identity.name, c.identity.category))
+                        .collect();
+                    self.conversation.add("system", &format!("References:\n{}", list.join("\n")));
+                }
+                Err(e) => self.conversation.add("system", &format!("Error: {e}")),
+            }
+            return;
+        }
+
+        if let Some(name) = args.strip_prefix("remove ") {
+            let name = name.trim();
+            let slug = reference::slug_from_name(name);
+            let path = reference::references_dir().join(format!("{slug}.toml"));
+            if path.exists() {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    self.conversation.add("system", &format!("Failed to remove: {e}"));
+                } else {
+                    self.active_refs.retain(|s| s != &slug);
+                    self.conversation.add("system", &format!("Removed reference '{slug}'."));
+                }
+            } else {
+                self.conversation.add("system", &format!("Reference '{slug}' not found."));
+            }
+            return;
+        }
+
+        let is_refresh = args.starts_with("refresh ");
+        let query = if is_refresh {
+            args.strip_prefix("refresh ").unwrap().trim()
+        } else {
+            args
+        };
+
+        // Try to load existing (unless refresh)
+        if !is_refresh {
+            match reference::load_one(query) {
+                Ok((comp, slug)) => {
+                    if !self.active_refs.contains(&slug) {
+                        self.active_refs.push(slug.clone());
+                    }
+                    let summary = reference::summarize_for_prompt(&[&comp]);
+                    self.conversation.add("system", &format!("Loaded reference:\n{summary}"));
+                    return;
+                }
+                Err(e) if e.contains("Multiple matches") => {
+                    self.conversation.add("system", &e);
+                    return;
+                }
+                Err(_) => {} // Not found — fall through to research
+            }
+        }
+
+        // Research new component via Claude
+        self.conversation.add("system", &format!("Researching '{query}'..."));
+        self.busy = BusyState::Thinking;
+        self.streaming_text.clear();
+
+        let model = self.claude_model.clone();
+        let tx = self.bg_tx.clone();
+        let stream_tx = self.stream_tx.clone();
+        let bg_pid = Arc::clone(&self.bg_pid);
+        let name = query.to_string();
+        let images = attached_images;
+
+        std::thread::spawn(move || {
+            let research_prompt = format!(
+                "Research the component: {name}\n\
+                 Find official datasheet or technical drawing.\n\
+                 Extract ALL mechanical dimensions in millimeters and key constraints.\n\
+                 Return the data as a TOML block in this exact format:\n\
+                 ```toml\n\
+                 [identity]\n\
+                 name = \"full component name\"\n\
+                 manufacturer = \"...\"\n\
+                 part_number = \"...\"\n\
+                 category = \"motor|fastener|bearing|connector|other\"\n\
+                 created = \"\"\n\
+                 updated = \"\"\n\n\
+                 [dimensions]\n\
+                 units = \"mm\"\n\
+                 key_name = value\n\n\
+                 [constraints]\n\
+                 key_with_unit_suffix = value\n\n\
+                 [sources]\n\
+                 urls = [\"...\"]\n\
+                 notes = \"...\"\n\
+                 ```\n\
+                 Return ONLY the TOML block, nothing else."
+            );
+
+            let result = claude::send_prompt(
+                &model,
+                "You are a technical reference researcher. Search for component datasheets and extract precise mechanical specifications.",
+                None,
+                &research_prompt,
+                &images,
+                Some(&stream_tx),
+                Some(&bg_pid),
+            );
+            bg_pid.store(0, Ordering::SeqCst);
+            let _ = tx.send(BackgroundResult::ReferenceResearch {
+                name,
+                result: result.map(|(response, _sid)| response),
+            });
+        });
+    }
+
+    fn save_pending_reference(&mut self, pending: PendingReference) {
+        // Try to extract TOML from the response (look for ```toml block)
+        let toml_str = if let Ok(extracted) = parser::parse_toml_response(&pending.raw_response) {
+            extracted
+        } else {
+            pending.raw_response.clone()
+        };
+
+        let now = chrono::Utc::now().to_rfc3339();
+
+        match toml::from_str::<reference::ReferenceComponent>(&toml_str) {
+            Ok(mut comp) => {
+                if comp.identity.created.is_empty() {
+                    comp.identity.created = now.clone();
+                }
+                if comp.identity.updated.is_empty() {
+                    comp.identity.updated = now;
+                }
+                match reference::save(&comp) {
+                    Ok(saved_slug) => {
+                        if !self.active_refs.contains(&saved_slug) {
+                            self.active_refs.push(saved_slug.clone());
+                        }
+                        self.conversation.add("system",
+                            &format!("Saved reference '{}' as {saved_slug}.toml", comp.identity.name));
+                    }
+                    Err(e) => self.conversation.add("system", &format!("Failed to save: {e}")),
+                }
+            }
+            Err(e) => {
+                self.conversation.add("system",
+                    &format!("Failed to parse reference TOML: {e}\nTry `/ref refresh {}` to retry.", pending.name));
+            }
         }
     }
 
@@ -1257,6 +1440,22 @@ impl<'a> App<'a> {
             }
             BackgroundResult::BuildComplete(build_result) => {
                 self.handle_build_result(build_result);
+            }
+            BackgroundResult::ReferenceResearch { name, result } => {
+                match result {
+                    Ok(response) => {
+                        self.conversation.add("assistant", &response);
+                        self.conversation.add("system", "Save as reference? (yes/no)");
+                        self.ref_confirm_pending = Some(PendingReference {
+                            name,
+                            raw_response: response,
+                        });
+                    }
+                    Err(e) => {
+                        self.conversation.add("system", &format!("Research failed: {e}"));
+                    }
+                }
+                self.busy = BusyState::Idle;
             }
         }
     }
@@ -2086,6 +2285,8 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         rename_pending: None,
         delete_pending: None,
         save_part_pending: false,
+        active_refs: Vec::new(),
+        ref_confirm_pending: None,
         streaming_text: String::new(),
         build_timeout: 60,
         usage_monitor: usage::UsageMonitor::new(),
