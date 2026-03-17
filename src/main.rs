@@ -9,6 +9,7 @@ mod parser;
 mod phase;
 mod preview;
 mod prompt_builder;
+mod render;
 mod python;
 mod reference;
 mod reference_detect;
@@ -313,64 +314,13 @@ impl<'a> App<'a> {
 
         // Render legend bar
         let legend_area = panes.legend;
-        let mut legend_spans = self.phase_indicator_spans();
-        legend_spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        legend_spans.push(Span::styled(" Alt+1-5 ", Style::default().fg(Color::Black).bg(Color::DarkGray)));
-        legend_spans.push(Span::raw(" Phase "));
-        legend_spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        let focus_spans: Vec<Span> = match self.focus {
-            Focus::Input => vec![
-                Span::styled(" Enter ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Send "),
-                Span::styled(" PgUp/Dn ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Scroll "),
-                Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Panes "),
-                Span::styled(" Ctrl+W ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Save "),
-                Span::styled(" Ctrl+V ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Img "),
-                Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Quit "),
-            ],
-            Focus::ProjectTree => vec![
-                Span::styled(" j/k ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Navigate "),
-                Span::styled(" Enter ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Open/Expand "),
-                Span::styled(" e ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Rename "),
-                Span::styled(" d ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Delete "),
-                Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Panes "),
-                Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Quit "),
-            ],
-            Focus::Conversation => vec![
-                Span::styled(" j/k ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Scroll "),
-                Span::styled(" u/d ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Page "),
-                Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Panes "),
-                Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Quit "),
-            ],
-            Focus::RightPanel => vec![
-                Span::styled(" h/l ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Tabs "),
-                Span::styled(" j/k ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Scroll "),
-                Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Panes "),
-                Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
-                Span::raw(" Quit "),
-            ],
-        };
-        legend_spans.extend(focus_spans);
-        let legend_text = Line::from(legend_spans);
-        frame.render_widget(Paragraph::new(legend_text), legend_area);
+        let phase_spans = render::phase_indicator_spans(
+            self.phase,
+            if self.component_list.len() > 0 { Some(self.component_list.selected()) } else { None },
+            self.component_list.len(),
+            self.component_list.selected_id(),
+        );
+        render::render_legend_bar(frame, legend_area, self.focus, phase_spans);
 
         // Render usage stats (right-aligned overlay on legend bar)
         self.usage_monitor.maybe_refresh();
@@ -378,45 +328,6 @@ impl<'a> App<'a> {
         tui::status_bar::render_usage_bar(frame, legend_area, &usage_stats);
     }
 
-    /// Build phase indicator spans for the legend bar.
-    /// Shows: " Spec ● ○ ○ ○ ○ " with the current phase filled.
-    /// During Component phase, also shows progress like "Component 2/5: Case Body".
-    fn phase_indicator_spans(&self) -> Vec<Span<'static>> {
-        let mut spans = Vec::new();
-        let current_idx = self.phase.index();
-
-        // Phase label — with component progress when applicable
-        let label = match self.phase {
-            Phase::Component => {
-                let total = self.component_list.len();
-                if total > 0 {
-                    let current = self.component_list.selected() + 1;
-                    let name = self.component_list.selected_id()
-                        .unwrap_or("?")
-                        .to_string();
-                    format!(" {} {}/{}: {} ", self.phase.label(), current, total, name)
-                } else {
-                    format!(" {} ", self.phase.label())
-                }
-            }
-            _ => format!(" {} ", self.phase.label()),
-        };
-        spans.push(Span::styled(label, Style::default().fg(Color::White).bold()));
-
-        // Phase dots
-        for i in 0..5 {
-            let dot = if i == current_idx { "\u{25cf}" } else { "\u{25cb}" };
-            let style = if i == current_idx {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            spans.push(Span::styled(format!(" {dot}"), style));
-        }
-        spans.push(Span::raw(" "));
-
-        spans
-    }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         use KeyCode::*;
