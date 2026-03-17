@@ -206,6 +206,7 @@ impl ClaudeBridge {
 /// The config points the Claude CLI at our MCP server with appropriate args.
 pub fn generate_mcp_config(phase_name: &str, session_dir: Option<&Path>) -> Result<PathBuf, String> {
     let server_path = find_mcp_server()?;
+    let python_cmd = find_cadquery_python(&server_path);
     let mut args = vec![
         server_path.to_string_lossy().to_string(),
         "--phase".to_string(),
@@ -218,7 +219,7 @@ pub fn generate_mcp_config(phase_name: &str, session_dir: Option<&Path>) -> Resu
     let config = serde_json::json!({
         "mcpServers": {
             "mimodel": {
-                "command": "python3",
+                "command": python_cmd,
                 "args": args
             }
         }
@@ -248,4 +249,24 @@ fn find_mcp_server() -> Result<PathBuf, String> {
         }
     }
     Err("mcp/server.py not found".to_string())
+}
+
+/// Find the Python interpreter that has CadQuery+OCP installed.
+/// Looks for .venv-cadquery/bin/python3 relative to the project root
+/// (same directory tree as mcp/server.py). Falls back to "python3".
+fn find_cadquery_python(server_path: &Path) -> String {
+    // server_path is like /path/to/project/mcp/server.py
+    // project root is the parent of mcp/
+    if let Some(project_root) = server_path.parent().and_then(|p| p.parent()) {
+        let venv_python = project_root.join(".venv-cadquery/bin/python3");
+        if venv_python.exists() {
+            return venv_python.to_string_lossy().to_string();
+        }
+        // Also check .venv/bin/python3
+        let venv_python = project_root.join(".venv/bin/python3");
+        if venv_python.exists() {
+            return venv_python.to_string_lossy().to_string();
+        }
+    }
+    "python3".to_string()
 }
