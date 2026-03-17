@@ -30,7 +30,7 @@ pub struct LayoutConfig {
 
 impl Default for LayoutConfig {
     fn default() -> Self {
-        Self { show_sidebar: true, show_model_panel: true, phase: Phase::Spec, input_height: 3 }
+        Self { show_sidebar: true, show_model_panel: true, phase: Phase::Spec, input_height: 5 }
     }
 }
 
@@ -108,7 +108,7 @@ mod tests {
         let panes = compute_layout(area, &config);
         assert!(panes.left_panel.is_some());
         assert!(panes.right_panel.is_some());
-        assert_eq!(panes.input_bar.height, 3); // default input_height
+        assert_eq!(panes.input_bar.height, 5); // default input_height
     }
 
     #[test]

@@ -192,7 +192,7 @@ impl<'a> App<'a> {
 
         // Dynamic input bar height: grows with line count (1 line per row + 2 for border).
         let line_count = self.input_bar.textarea.lines().len();
-        self.layout_config.input_height = (line_count as u16 + 2).clamp(3, 7);
+        self.layout_config.input_height = (line_count as u16 + 2).clamp(5, 9);
 
         // Phase-aware placeholder text
         let placeholder = match self.phase {
@@ -1405,7 +1405,7 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
     let mut pt = ProjectTreePane::new();
     pt.refresh(&projects);
     App {
-        focus: Focus::Input,
+        focus: Focus::ProjectTree,
         layout_config: LayoutConfig::default(),
         phase: Phase::Spec,
         project_tree: pt,
