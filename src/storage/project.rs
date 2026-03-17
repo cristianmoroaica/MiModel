@@ -56,6 +56,12 @@ pub fn list_projects() -> Result<Vec<Project>, String> {
         let path = entry.path();
         if !path.is_dir() { continue; }
 
+        // Skip non-project directories (references library, etc.)
+        let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+        if dir_name == "references" || dir_name.starts_with('.') {
+            continue;
+        }
+
         let meta_path = path.join("project.json");
         let meta = if meta_path.exists() {
             let json = std::fs::read_to_string(&meta_path).unwrap_or_default();
