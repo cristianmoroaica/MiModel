@@ -231,14 +231,74 @@ impl<'a> App<'a> {
 
     pub(crate) fn handle_tree_key(&mut self, key: crossterm::event::KeyEvent) {
         use KeyCode::*;
+        use crate::tui::project_tree::{TreeEntryKind, FileAction};
+
         match key.code {
             Up | Char('k') => self.project_tree.select_prev(),
             Down | Char('j') => self.project_tree.select_next(),
-            Char('e') => {
-                // Rename selected item
+            Right | Char('l') => {
+                // Expand session file tree or project without loading
                 if let Some(entry) = self.project_tree.selected_entry() {
-                    if entry.project_idx == usize::MAX {
-                        return; // Can't rename "+ New Project"
+                    match entry.kind {
+                        TreeEntryKind::Session => {
+                            if let Some(ref name) = entry.session_name {
+                                let name = name.clone();
+                                if !self.project_tree.expanded_sessions.contains(&name) {
+                                    self.project_tree.toggle_session_expand(&name);
+                                    let projects = self.projects.clone();
+                                    self.project_tree.refresh(&projects);
+                                }
+                            }
+                        }
+                        TreeEntryKind::Project => {
+                            let idx = entry.project_idx;
+                            if self.project_tree.active_project != Some(idx) {
+                                self.project_tree.active_project = Some(idx);
+                                let projects = self.projects.clone();
+                                self.project_tree.refresh(&projects);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                return;
+            }
+            Left | Char('h') => {
+                // Collapse session file tree or project
+                if let Some(entry) = self.project_tree.selected_entry() {
+                    match entry.kind {
+                        TreeEntryKind::Session => {
+                            if let Some(ref name) = entry.session_name {
+                                let name = name.clone();
+                                if self.project_tree.expanded_sessions.contains(&name) {
+                                    self.project_tree.toggle_session_expand(&name);
+                                    let projects = self.projects.clone();
+                                    self.project_tree.refresh(&projects);
+                                }
+                            }
+                        }
+                        TreeEntryKind::Project => {
+                            let idx = entry.project_idx;
+                            if self.project_tree.active_project == Some(idx) {
+                                self.project_tree.active_project = None;
+                                let projects = self.projects.clone();
+                                self.project_tree.refresh(&projects);
+                            }
+                        }
+                        TreeEntryKind::File => {
+                            // Navigate up to parent session/project
+                            self.project_tree.select_prev();
+                        }
+                        _ => {}
+                    }
+                }
+                return;
+            }
+            Char('e') => {
+                // Rename — only switch to Input for rename/delete (needs text input)
+                if let Some(entry) = self.project_tree.selected_entry() {
+                    if entry.kind == TreeEntryKind::NewProject || entry.kind == TreeEntryKind::File {
+                        return;
                     }
                     if let Some(ref session_name) = entry.session_name {
                         self.conversation.add("system", &format!("Rename session '{session_name}': type new name and press Enter."));
@@ -261,10 +321,10 @@ impl<'a> App<'a> {
                 return;
             }
             Char('d') => {
-                // Delete selected item — prompt for confirmation
+                // Delete — switch to Input for confirmation
                 if let Some(entry) = self.project_tree.selected_entry() {
-                    if entry.project_idx == usize::MAX {
-                        return; // Can't delete "+ New Project"
+                    if entry.kind == TreeEntryKind::NewProject || entry.kind == TreeEntryKind::File {
+                        return;
                     }
                     if let Some(ref session_name) = entry.session_name {
                         self.conversation.add("system", &format!("Delete session '{session_name}'? Type 'yes' to confirm."));
@@ -287,19 +347,20 @@ impl<'a> App<'a> {
                 return;
             }
             Enter => {
-                // Clone the entry to avoid borrow issues
                 if let Some(entry) = self.project_tree.selected_entry() {
-                    let is_project = entry.is_project;
+                    let kind = entry.kind.clone();
                     let project_idx = entry.project_idx;
                     let session_name = entry.session_name.clone();
+                    let file_path = entry.file_path.clone();
 
-                    if is_project {
-                        if project_idx == usize::MAX {
-                            // "New Project" entry
+                    match kind {
+                        TreeEntryKind::NewProject => {
                             self.new_project_pending = true;
-                            self.conversation.add("system", "Next prompt will create a new project.");
-                        } else {
-                            // Toggle project expansion
+                            self.conversation.add("system", "Type project name and press Enter.");
+                            self.focus = Focus::Input;
+                        }
+                        TreeEntryKind::Project => {
+                            // Toggle project expansion — stay in tree
                             let expanding = self.project_tree.active_project != Some(project_idx);
                             self.project_tree.active_project = if expanding {
                                 Some(project_idx)
@@ -308,15 +369,64 @@ impl<'a> App<'a> {
                             };
                             let projects = self.projects.clone();
                             self.project_tree.refresh(&projects);
-
                             if expanding {
                                 self.open_project(project_idx);
                             }
                         }
-                    } else if let Some(ref name) = session_name {
-                        // Load session
-                        self.load_session(project_idx, name.clone());
+                        TreeEntryKind::Session => {
+                            if let Some(ref name) = session_name {
+                                // Load session AND expand its file tree
+                                if !self.project_tree.expanded_sessions.contains(name) {
+                                    self.project_tree.toggle_session_expand(name);
+                                }
+                                self.load_session(project_idx, name.clone());
+                                let projects = self.projects.clone();
+                                self.project_tree.refresh(&projects);
+                            }
+                        }
+                        TreeEntryKind::File => {
+                            if let Some(ref path) = file_path {
+                                match ProjectTreePane::file_action(path) {
+                                    FileAction::OpenViewer(p) => {
+                                        if let Err(e) = self.viewer.update_working_stl(&p) {
+                                            self.conversation.add("system", &format!("Viewer error: {e}"));
+                                        } else {
+                                            if !self.viewer.is_running() {
+                                                let _ = self.viewer.show();
+                                            }
+                                            self.conversation.add("system", &format!("Opened in viewer: {}", p.file_name().unwrap_or_default().to_string_lossy()));
+                                        }
+                                    }
+                                    FileAction::LoadText(p) => {
+                                        match std::fs::read_to_string(&p) {
+                                            Ok(content) => {
+                                                let filename = p.file_name().unwrap_or_default().to_string_lossy();
+                                                self.conversation.add("system", &format!("─── {} ───", filename));
+                                                self.conversation.add("system", &content);
+                                                self.conversation.scroll_to_bottom();
+                                                // Switch to conversation to see the content
+                                                self.focus = Focus::Conversation;
+                                            }
+                                            Err(e) => {
+                                                self.conversation.add("system", &format!("Failed to read: {e}"));
+                                            }
+                                        }
+                                    }
+                                    FileAction::AttachFile(p) => {
+                                        let kind = if crate::image::is_pdf(&p) { "PDF" } else { "image" };
+                                        let size_kb = std::fs::metadata(&p).map(|m| m.len() / 1024).unwrap_or(0);
+                                        self.conversation.add("system", &format!("Attached {kind} ({size_kb}KB): {}", p.display()));
+                                        self.pending_images.push(p);
+                                    }
+                                    FileAction::None => {
+                                        self.conversation.add("system", &format!("File type not supported for opening: {}", path.display()));
+                                    }
+                                }
+                            }
+                        }
+                        TreeEntryKind::Placeholder => {}
                     }
+                    // Note: focus stays in ProjectTree unless explicitly changed above
                 }
             }
             _ => {}
