@@ -56,11 +56,7 @@ impl ProjectTreePane {
                     for session_info in &project.sessions {
                         let active = self.active_session.as_deref() == Some(session_info.name.as_str());
                         let marker = if active { "◀" } else { "" };
-                        let label = if session_info.is_legacy {
-                            format!("  ├─ {} [legacy] {marker}", session_info.name)
-                        } else {
-                            format!("  ├─ {} {marker}", session_info.name)
-                        };
+                        let label = format!("  ├─ {} {marker}", session_info.name);
                         self.entries.push(TreeEntry {
                             label,
                             is_project: false,

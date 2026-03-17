@@ -12,6 +12,7 @@ mod prompt_builder;
 mod python;
 mod reference;
 mod reference_detect;
+mod session_manager;
 mod spec;
 mod stl;
 mod storage;
@@ -20,10 +21,10 @@ mod usage;
 mod viewer;
 
 use crate::config::Config;
-use crate::model_session::{PhaseSession, Session};
 use crate::phase::Phase;
 use crate::storage::Project;
 use crate::claude_bridge::BusyState;
+use crate::session_manager::SessionManager;
 use crate::tui::{BackgroundResult, Focus};
 use crate::tui::layout::{LayoutConfig, PanelRects, compute_layout};
 use crate::tui::input_bar::InputBar;
@@ -38,7 +39,7 @@ use crate::viewer::Viewer;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -65,8 +66,7 @@ struct App<'a> {
     component_list: ComponentListPanel,
 
     // Backend
-    session: Session,
-    phase_session: Option<PhaseSession>,
+    session: SessionManager,
     claude_system_prompt: String,
     claude: claude_bridge::ClaudeBridge,
     viewer: Viewer,
@@ -75,9 +75,6 @@ struct App<'a> {
 
     // Storage
     projects: Vec<Project>,
-    active_project_idx: Option<usize>,
-    active_session_name: Option<String>,
-    active_session_dir: Option<PathBuf>,
 
     // App state
     should_quit: bool,
@@ -124,7 +121,7 @@ impl<'a> App<'a> {
 
         let python_path = config.python_path();
         let build_timeout = config.defaults.build_timeout;
-        let session = Session::new(build_timeout, python_path.clone());
+        let session = SessionManager::new(build_timeout, python_path.clone());
 
         // Ensure ~/MiModel/ exists and scan for projects
         let _ = storage::project::ensure_root();
@@ -149,16 +146,12 @@ impl<'a> App<'a> {
             component_tree_panel: ComponentTreePanel::new(),
             component_list: ComponentListPanel::new(),
             session,
-            phase_session: None,
             claude_system_prompt,
             claude: claude_bridge::ClaudeBridge::new(config.claude.model),
             viewer,
             pending_images: Vec::new(),
             python_path,
             projects,
-            active_project_idx: None,
-            active_session_name: None,
-            active_session_dir: None,
             should_quit: false,
             dirty: true,
             spinner_frame: 0,
@@ -449,8 +442,8 @@ impl<'a> App<'a> {
                     if self.session.undo() {
                         self.conversation.add("system", "Undone last iteration.");
                         self.model_panel.clear();
-                        if let Some(meta) = &self.session.current_metadata {
-                            self.model_panel.update(meta, None, 0);
+                        if let Some(meta) = self.session.current_metadata.clone() {
+                            self.model_panel.update(&meta, None, 0);
                         }
                     } else {
                         self.conversation.add("system", "Nothing to undo.");
@@ -470,8 +463,7 @@ impl<'a> App<'a> {
                     let now = std::time::Instant::now();
                     if let Some(last) = self.last_ctrl_c {
                         if now.duration_since(last).as_millis() < 500 {
-                            self.sync_conversations_to_phase_session();
-                            self.save_phase_session();
+                            self.session.save(self.phase);
                             self.cleanup();
                             self.should_quit = true;
                         } else {
@@ -508,7 +500,7 @@ impl<'a> App<'a> {
             }
             (Char('v'), KeyModifiers::CONTROL) => {
                 // Paste clipboard image
-                let img_dir = self.active_session_dir
+                let img_dir = self.session.active_dir
                     .as_ref()
                     .map(|d| d.join("images"))
                     .unwrap_or_else(|| {
@@ -545,7 +537,7 @@ impl<'a> App<'a> {
             }
             (Char('s'), KeyModifiers::CONTROL) => {
                 // Export current STL
-                if let Some(_stl_path) = self.session.latest_stl_path() {
+                if self.session.latest_stl_path().is_some() {
                     let export_dest = dirs::home_dir()
                         .unwrap_or_else(|| PathBuf::from("."))
                         .join("model_export.stl");
@@ -796,7 +788,7 @@ impl<'a> App<'a> {
             }
             if let Some(ref stl_src) = self.session.latest_stl_path() {
                 // Save to project dir as <name>.stl
-                let dest_dir = self.active_session_dir
+                let dest_dir = self.session.active_dir
                     .as_ref()
                     .and_then(|d| d.parent().map(|p| p.to_path_buf()))
                     .unwrap_or_else(|| storage::project::root_dir().join("Untitled"));
@@ -902,9 +894,6 @@ impl<'a> App<'a> {
             self.conversation.clear();
             self.model_panel.clear();
             self.claude.session_id = None;
-            self.active_session_name = None;
-            self.active_session_dir = None;
-            self.phase_session = None;
             self.phase = Phase::Spec;
             self.layout_config.phase = Phase::Spec;
             self.active_refs.clear();
@@ -931,7 +920,7 @@ impl<'a> App<'a> {
         }
 
         // Auto-create session name from first prompt if none active
-        if self.active_session_name.is_none() {
+        if self.session.active_name.is_none() {
             let session_name: String = text.chars()
                 .filter(|c| c.is_alphanumeric() || *c == ' ')
                 .take(30)
@@ -939,24 +928,20 @@ impl<'a> App<'a> {
             let session_name = session_name.trim().replace(' ', "_");
             if !session_name.is_empty() {
                 // Auto-create session dir under active project or "Untitled"
-                let project_path = self.active_project_idx
+                let project_path = self.session.project_idx
                     .and_then(|idx| self.projects.get(idx))
                     .map(|p| p.path.clone())
                     .unwrap_or_else(|| storage::project::root_dir().join("Untitled"));
                 let session_dir = project_path.join(&session_name);
-                self.active_session_name = Some(session_name);
-                self.active_session_dir = Some(session_dir);
+                self.session.active_name = Some(session_name);
+                self.session.active_dir = Some(session_dir);
             }
         }
 
         // Create PhaseSession if we have a session dir but no phase session yet
-        if self.phase_session.is_none() {
-            if let Some(ref dir) = self.active_session_dir {
-                self.phase_session = Some(PhaseSession::new(
-                    dir.clone(),
-                    self.build_timeout,
-                    self.python_path.clone(),
-                ));
+        if self.session.phase_session.is_none() {
+            if let Some(dir) = self.session.active_dir.clone() {
+                self.session.create(dir, self.build_timeout, self.python_path.clone());
             }
         }
 
@@ -974,11 +959,8 @@ impl<'a> App<'a> {
 
         // Add user message to conversation
         self.conversation.add("user", &clean_text);
-        self.session.add_user_message(&clean_text);
-
-        // Sync to phase session and auto-save
-        self.sync_conversations_to_phase_session();
-        self.save_phase_session();
+        self.session.add_message(self.phase, "user", &clean_text);
+        self.session.save(self.phase);
 
         // Phase-specific dispatch
         match self.phase {
@@ -1251,7 +1233,7 @@ impl<'a> App<'a> {
             self.phase = Phase::Decompose;
             self.layout_config.phase = Phase::Decompose;
             self.claude.session_id = None; // Fresh session for Decompose
-            self.save_phase_session();
+            self.session.save(self.phase);
         } else {
             // Append Claude's response to the spec panel for visibility
             if !spec_content.is_empty() {
@@ -1332,7 +1314,7 @@ impl<'a> App<'a> {
         self.phase = Phase::Component;
         self.layout_config.phase = Phase::Component;
         self.claude.session_id = None; // Fresh session for Component phase
-        self.save_phase_session();
+        self.session.save(self.phase);
     }
 
     fn handle_bg_result(&mut self, result: BackgroundResult) {
@@ -1347,11 +1329,8 @@ impl<'a> App<'a> {
                     Ok(response) => {
                         // Add assistant message to conversation
                         self.conversation.add("assistant", &response);
-                        self.session.add_assistant_message(&response);
-
-                        // Sync to phase session and auto-save
-                        self.sync_conversations_to_phase_session();
-                        self.save_phase_session();
+                        self.session.add_message(self.phase, "assistant", &response);
+                        self.session.save(self.phase);
 
                         match self.phase {
                             Phase::Spec => {
@@ -1457,18 +1436,9 @@ impl<'a> App<'a> {
                     }
                 }
 
-                // Auto-save (legacy session)
-                if let Some(ref session_dir) = self.active_session_dir.clone() {
-                    let session_name = self.active_session_name.clone().unwrap_or_else(|| "session".to_string());
-                    let claude_sid = self.claude.session_id.clone();
-                    if let Err(e) = self.session.save_to(session_dir, &session_name, claude_sid.as_deref()) {
-                        self.conversation.add("system", &format!("Warning: auto-save failed: {e}"));
-                    } else {
-                        self.refresh_projects();
-                    }
-                }
                 // Auto-save phase session
-                self.save_phase_session();
+                self.session.save(self.phase);
+                self.refresh_projects();
             }
             python::BuildResult::BuildError(e) | python::BuildResult::SyntaxError(e) => {
                 self.conversation.add("system", &format!("Build error: {}", e.error));
@@ -1484,45 +1454,30 @@ impl<'a> App<'a> {
         if let Some(project) = self.projects.get(project_idx) {
             let session_dir = project.path.join(&session_name);
 
-            // Check if this is a new-format phase session
-            let session_json_path = session_dir.join("session.json");
-            if session_json_path.exists() {
-                if let Ok(json_str) = std::fs::read_to_string(&session_json_path) {
-                    if !crate::storage::session::is_legacy_session_json(&json_str) {
-                        // New format — load as PhaseSession
-                        self.load_phase_session(&session_dir, &session_name, project_idx);
-                        return;
-                    }
-                }
-            }
+            match self.session.load(&session_dir, self.build_timeout, self.python_path.clone()) {
+                Ok(()) => {
+                    let phase = self.session.phase_session.as_ref()
+                        .map(|ps| ps.phase)
+                        .unwrap_or(Phase::Spec);
 
-            // Fall through to legacy session loading
-            let claude_session_id = if session_json_path.exists() {
-                std::fs::read_to_string(&session_json_path)
-                    .ok()
-                    .and_then(|json| serde_json::from_str::<model_session::SessionData>(&json).ok())
-                    .and_then(|data| data.claude_session_id)
-            } else {
-                None
-            };
+                    // Restore phase
+                    self.phase = phase;
+                    self.layout_config.phase = phase;
 
-            match Session::load_from(&session_dir, self.build_timeout, self.python_path.clone()) {
-                Ok(loaded_session) => {
-                    // Restore conversation pane
+                    // Restore conversation from saved data
                     self.conversation.clear();
-                    for msg in &loaded_session.messages {
-                        self.conversation.add(&msg.role, &msg.content);
+                    let entries = self.session.conversations(phase);
+                    for entry in entries {
+                        self.conversation.add(&entry.role, &entry.content);
                     }
+                    self.conversation.add("system", &format!(
+                        "Resumed session '{}' in {} phase.", session_name, phase.label()
+                    ));
 
-                    // Update model panel and viewer
-                    let stl_path = loaded_session.latest_stl_path();
-                    if let Some(ref meta) = loaded_session.current_metadata {
-                        self.model_panel.update(meta, stl_path.as_deref(), loaded_session.iteration());
-                    } else {
-                        self.model_panel.clear();
-                    }
-                    if let Some(ref src) = stl_path {
-                        if let Err(e) = self.viewer.update_working_stl(src) {
+                    // Restore viewer with working.stl if it exists
+                    let working_stl = session_dir.join("working.stl");
+                    if working_stl.exists() {
+                        if let Err(e) = self.viewer.update_working_stl(&working_stl) {
                             self.conversation.add("system", &format!("Warning: {e}"));
                         }
                         if !self.viewer.is_running() {
@@ -1530,20 +1485,21 @@ impl<'a> App<'a> {
                         }
                     }
 
-                    self.session = loaded_session;
-                    self.claude.session_id = claude_session_id;
-                    self.active_project_idx = Some(project_idx);
-                    self.active_session_name = Some(session_name.clone());
-                    self.active_session_dir = Some(session_dir);
-                    self.phase_session = None; // Legacy session, no phase session
+                    // Crash recovery hint
+                    if phase == Phase::Component {
+                        self.conversation.add("system",
+                            "Tip: If the last build was interrupted, type 'undo' to restore the previous state.");
+                    }
+
+                    // Store session state
+                    self.session.project_idx = Some(project_idx);
+                    self.session.active_name = Some(session_name.clone());
 
                     // Update project tree selection
                     self.project_tree.active_project = Some(project_idx);
-                    self.project_tree.active_session = Some(session_name.clone());
-                    let projects = self.projects.clone();
-                    self.project_tree.refresh(&projects);
+                    self.project_tree.active_session = Some(session_name.to_string());
+                    self.refresh_projects();
 
-                    self.conversation.add("system", &format!("Loaded session '{session_name}'."));
                     self.focus = Focus::Input;
                 }
                 Err(e) => {
@@ -1553,71 +1509,16 @@ impl<'a> App<'a> {
         }
     }
 
-    fn load_phase_session(&mut self, session_dir: &Path, session_name: &str, project_idx: usize) {
-        match PhaseSession::load(session_dir, self.build_timeout, self.python_path.clone()) {
-            Ok(ps) => {
-                // Restore phase
-                self.phase = ps.phase;
-                self.layout_config.phase = ps.phase;
-
-                // Restore conversation from saved data
-                self.conversation.clear();
-                let phase_key = ps.phase.label().to_string();
-                if let Some(entries) = ps.conversations.get(&phase_key) {
-                    for entry in entries {
-                        self.conversation.add(&entry.role, &entry.content);
-                    }
-                }
-                self.conversation.add("system", &format!(
-                    "Resumed session '{}' in {} phase.", session_name, ps.phase.label()
-                ));
-
-                // Restore viewer with working.stl if it exists
-                let working_stl = session_dir.join("working.stl");
-                if working_stl.exists() {
-                    if let Err(e) = self.viewer.update_working_stl(&working_stl) {
-                        self.conversation.add("system", &format!("Warning: {e}"));
-                    }
-                    if !self.viewer.is_running() {
-                        let _ = self.viewer.show();
-                    }
-                }
-
-                // Crash recovery hint (Task 26)
-                if ps.phase == Phase::Component {
-                    self.conversation.add("system",
-                        "Tip: If the last build was interrupted, type 'undo' to restore the previous state.");
-                }
-
-                // Store session state
-                self.active_project_idx = Some(project_idx);
-                self.active_session_name = Some(session_name.to_string());
-                self.active_session_dir = Some(session_dir.to_path_buf());
-                self.phase_session = Some(ps);
-
-                // Update project tree selection
-                self.project_tree.active_project = Some(project_idx);
-                self.project_tree.active_session = Some(session_name.to_string());
-                self.refresh_projects();
-
-                self.focus = Focus::Input;
-            }
-            Err(e) => {
-                self.conversation.add("system", &format!("Failed to load session: {e}"));
-            }
-        }
-    }
-
     fn open_project(&mut self, project_idx: usize) {
         if let Some(project) = self.projects.get(project_idx) {
             // Set active project so new prompts land here
-            self.active_project_idx = Some(project_idx);
-            self.active_session_name = None;
-            self.active_session_dir = None;
+            self.session.project_idx = Some(project_idx);
+            self.session.active_name = None;
+            self.session.active_dir = None;
+            self.session.phase_session = None;
             self.claude.session_id = None;
 
-            // Reset session state
-            self.session.reset();
+            // Reset build state (but don't clear project_idx/active_name which we just set)
             self.conversation.clear();
             self.model_panel.clear();
 
@@ -1640,9 +1541,9 @@ impl<'a> App<'a> {
                     let session_path = project.path.join(sname);
                     let status = storage::session::session_status(&session_path);
                     let detail = match status {
-                        storage::session::SessionStatus::Ok { iteration_count, modified } => {
-                            let date = modified.split('T').next().unwrap_or(&modified);
-                            format!("  {sname}  ({iteration_count} iterations, {date})")
+                        storage::session::SessionStatus::Ok { phase, created } => {
+                            let date = created.split('T').next().unwrap_or(&created);
+                            format!("  {sname}  ({phase}, {date})")
                         }
                         storage::session::SessionStatus::Empty => {
                             format!("  {sname}  (empty)")
@@ -1736,33 +1637,6 @@ impl<'a> App<'a> {
         self.claude.cancel();
     }
 
-    /// Copy the in-memory conversation pane entries into the PhaseSession's
-    /// conversations map (keyed by current phase label).
-    fn sync_conversations_to_phase_session(&mut self) {
-        if let Some(ref mut ps) = self.phase_session {
-            let key = self.phase.label().to_string();
-            let entries: Vec<crate::storage::session::ConversationEntry> = self.conversation.entries
-                .iter()
-                .map(|e| crate::storage::session::ConversationEntry {
-                    role: e.role.clone(),
-                    content: e.content.clone(),
-                })
-                .collect();
-            ps.conversations.insert(key, entries);
-        }
-    }
-
-    /// Save the PhaseSession to disk (auto-save helper).
-    /// Syncs the current phase into the PhaseSession and writes session.json.
-    fn save_phase_session(&mut self) {
-        if let Some(ref mut ps) = self.phase_session {
-            ps.phase = self.phase;
-            if let Err(e) = ps.save() {
-                self.conversation.add("system", &format!("Warning: auto-save failed: {e}"));
-            }
-        }
-    }
-
     /// Attempt to switch to a different phase.
     /// For now, allows free navigation between phases.
     /// Prerequisite validation will be added when phase flows are implemented.
@@ -1774,7 +1648,7 @@ impl<'a> App<'a> {
         self.layout_config.phase = target;
         // Add system message about phase change
         self.conversation.add("system", &format!("Switched to {} phase", target.label()));
-        self.save_phase_session();
+        self.session.save(self.phase);
     }
 
     // -- Phase-specific input handlers --
@@ -1797,7 +1671,7 @@ impl<'a> App<'a> {
             self.phase = Phase::Refinement;
             self.layout_config.phase = Phase::Refinement;
             self.claude.session_id = None;
-            self.save_phase_session();
+            self.session.save(self.phase);
         } else {
             // Send feedback about assembly to Claude
             self.send_assembly_feedback(text);
@@ -1858,7 +1732,7 @@ impl<'a> App<'a> {
     }
 
     fn handle_export(&mut self) {
-        if let Some(ref session_dir) = self.active_session_dir {
+        if let Some(ref session_dir) = self.session.active_dir {
             if let Some(stl_path) = self.session.latest_stl_path() {
                 let export_stl = session_dir.join("export.stl");
                 match std::fs::copy(&stl_path, &export_stl) {
@@ -1928,7 +1802,7 @@ impl<'a> App<'a> {
                 }
 
                 self.conversation.add("system", "Type 'approve' to accept, or describe changes.");
-                self.save_phase_session();
+                self.session.save(self.phase);
             }
             python::BuildResult::BuildError(ref e) | python::BuildResult::SyntaxError(ref e) => {
                 self.conversation.add("system", &format!("Build error: {}", e.error));
@@ -1965,14 +1839,14 @@ impl<'a> App<'a> {
             ));
             // Auto-start build for next component
             // self.start_component_build();
-            self.save_phase_session();
+            self.session.save(self.phase);
         } else {
             // Last component — transition to Assembly
             self.conversation.add("system", "All components approved! Transitioning to Assembly phase.");
             self.phase = Phase::Assembly;
             self.layout_config.phase = Phase::Assembly;
             self.claude.session_id = None;
-            self.save_phase_session();
+            self.session.save(self.phase);
         }
     }
 
@@ -2075,17 +1949,13 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         spec_panel: SpecPanel::new(),
         component_tree_panel: ComponentTreePanel::new(),
         component_list: ComponentListPanel::new(),
-        session: Session::new(60, python_path.clone()),
-        phase_session: None,
+        session: SessionManager::new(60, python_path.clone()),
         claude_system_prompt: String::new(),
         claude: claude_bridge::ClaudeBridge::new(config.claude.model.clone()),
         viewer: Viewer::new(&config.viewer.command),
         pending_images: Vec::new(),
         python_path,
         projects,
-        active_project_idx: None,
-        active_session_name: None,
-        active_session_dir: None,
         should_quit: false,
         dirty: true,
         spinner_frame: 0,

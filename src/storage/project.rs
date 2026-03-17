@@ -14,7 +14,6 @@ pub struct ProjectMeta {
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub name: String,
-    pub is_legacy: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -74,20 +73,13 @@ pub fn list_projects() -> Result<Vec<Project>, String> {
         };
 
         // List session subdirectories
-        use crate::storage::session::is_legacy_session_json;
         let mut sessions = Vec::new();
         if let Ok(sub_entries) = std::fs::read_dir(&path) {
             for sub in sub_entries.flatten() {
                 let sub_path = sub.path();
                 if sub_path.is_dir() && sub_path.join("session.json").exists() {
                     if let Some(name) = sub_path.file_name() {
-                        let session_json_path = sub_path.join("session.json");
-                        let is_legacy = if let Ok(json_str) = std::fs::read_to_string(&session_json_path) {
-                            is_legacy_session_json(&json_str)
-                        } else {
-                            true // Can't read = treat as legacy
-                        };
-                        sessions.push(SessionInfo { name: name.to_string_lossy().to_string(), is_legacy });
+                        sessions.push(SessionInfo { name: name.to_string_lossy().to_string() });
                     }
                 }
             }
@@ -212,18 +204,10 @@ mod tests {
     }
 
     #[test]
-    fn test_session_info_legacy_detection() {
+    fn test_session_info_detection() {
         with_test_root(|| {
             ensure_root().unwrap();
             let project_path = create_project("TestProj", "").unwrap();
-
-            // Create a legacy session
-            let legacy_dir = project_path.join("old_session");
-            std::fs::create_dir_all(&legacy_dir).unwrap();
-            std::fs::write(
-                legacy_dir.join("session.json"),
-                r#"{"name":"old","created":"2026-03-15","modified":"2026-03-15","iteration_count":2,"claude_session_id":null,"current_iteration":2,"engine":"cadquery","conversation":[]}"#
-            ).unwrap();
 
             // Create a new-format session
             let new_dir = project_path.join("new_session");
@@ -236,11 +220,8 @@ mod tests {
             let projects = list_projects().unwrap();
             let proj = projects.iter().find(|p| p.meta.name == "TestProj").unwrap();
 
-            let legacy = proj.sessions.iter().find(|s| s.name == "old_session").unwrap();
-            assert!(legacy.is_legacy);
-
-            let new = proj.sessions.iter().find(|s| s.name == "new_session").unwrap();
-            assert!(!new.is_legacy);
+            let session = proj.sessions.iter().find(|s| s.name == "new_session").unwrap();
+            assert_eq!(session.name, "new_session");
         });
     }
 }

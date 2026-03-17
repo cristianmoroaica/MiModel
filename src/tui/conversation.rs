@@ -105,28 +105,17 @@ impl ConversationPane {
 
         let text = Text::from(lines);
 
-        // Compute wrapped line count to get accurate scroll range.
-        // Inner width = area minus borders (1 each side).
-        let inner_width = area.width.saturating_sub(2).max(1) as usize;
-        let mut wrapped_lines: u16 = 0;
-        for line in &text.lines {
-            let line_width: usize = line.width();
-            if line_width == 0 {
-                wrapped_lines += 1;
-            } else {
-                wrapped_lines += ((line_width as f64) / (inner_width as f64)).ceil() as u16;
-            }
-        }
+        let paragraph = Paragraph::new(text)
+            .block(block)
+            .wrap(Wrap { trim: false });
 
+        // Use ratatui's own word-wrap line count for accurate scroll range.
+        let wrapped_lines = paragraph.line_count(area.width) as u16;
         let visible = area.height.saturating_sub(2); // minus borders
         let max_scroll = wrapped_lines.saturating_sub(visible);
         let scroll = self.scroll_offset.min(max_scroll);
 
-        let paragraph = Paragraph::new(text)
-            .block(block)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0));
-
+        let paragraph = paragraph.scroll((scroll, 0));
         frame.render_widget(paragraph, area);
         max_scroll
     }
