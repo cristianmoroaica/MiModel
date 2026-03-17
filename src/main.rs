@@ -1,5 +1,6 @@
 mod assembly;
 mod claude;
+mod claude_bridge;
 mod component;
 mod config;
 mod image;
@@ -22,7 +23,8 @@ use crate::config::Config;
 use crate::model_session::{PhaseSession, Session};
 use crate::phase::Phase;
 use crate::storage::Project;
-use crate::tui::{BackgroundResult, BusyState, Focus};
+use crate::claude_bridge::BusyState;
+use crate::tui::{BackgroundResult, Focus};
 use crate::tui::layout::{LayoutConfig, compute_layout};
 use crate::tui::input_bar::InputBar;
 use crate::tui::conversation::ConversationPane;
@@ -37,9 +39,6 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::Duration;
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -53,7 +52,6 @@ enum RenameTarget {
 struct App<'a> {
     // Focus and state
     focus: Focus,
-    busy: BusyState,
     layout_config: LayoutConfig,
     phase: Phase,
 
@@ -69,20 +67,11 @@ struct App<'a> {
     // Backend
     session: Session,
     phase_session: Option<PhaseSession>,
-    claude_model: Option<String>,
     claude_system_prompt: String,
-    claude_session_id: Option<String>,
+    claude: claude_bridge::ClaudeBridge,
     viewer: Viewer,
     pending_images: Vec<PathBuf>,
     python_path: String,
-
-    // Background channels
-    bg_tx: mpsc::Sender<BackgroundResult>,
-    bg_rx: mpsc::Receiver<BackgroundResult>,
-    /// Channel for streaming text chunks from Claude
-    stream_rx: mpsc::Receiver<String>,
-    stream_tx: mpsc::Sender<String>,
-    bg_pid: Arc<AtomicU32>,
 
     // Storage
     projects: Vec<Project>,
@@ -106,8 +95,6 @@ struct App<'a> {
     save_part_pending: bool,
     active_refs: Vec<String>,
     ref_confirm_pending: Option<PendingReference>,
-    /// Accumulates streaming text from Claude during Thinking state
-    streaming_text: String,
     build_timeout: u64,
     /// Claude API usage monitor (5h / 7d limits)
     usage_monitor: usage::UsageMonitor,
@@ -141,11 +128,6 @@ impl<'a> App<'a> {
         seed_references();
         let projects = storage::project::list_projects().unwrap_or_default();
 
-        // Setup background channel
-        let (bg_tx, bg_rx) = mpsc::channel::<BackgroundResult>();
-        let (stream_tx, stream_rx) = mpsc::channel::<String>();
-        let bg_pid = Arc::new(AtomicU32::new(0));
-
         let mut project_tree = ProjectTreePane::new();
         project_tree.refresh(&projects);
 
@@ -154,7 +136,6 @@ impl<'a> App<'a> {
 
         Ok(App {
             focus: Focus::ProjectTree,
-            busy: BusyState::Idle,
             layout_config: LayoutConfig::default(),
             phase: Phase::Spec,
             project_tree,
@@ -166,17 +147,11 @@ impl<'a> App<'a> {
             component_list: ComponentListPanel::new(),
             session,
             phase_session: None,
-            claude_model: config.claude.model,
             claude_system_prompt,
-            claude_session_id: None,
+            claude: claude_bridge::ClaudeBridge::new(config.claude.model),
             viewer,
             pending_images: Vec::new(),
             python_path,
-            bg_tx,
-            bg_rx,
-            stream_tx,
-            stream_rx,
-            bg_pid,
             projects,
             active_project_idx: None,
             active_session_name: None,
@@ -192,7 +167,6 @@ impl<'a> App<'a> {
             save_part_pending: false,
             active_refs: Vec::new(),
             ref_confirm_pending: None,
-            streaming_text: String::new(),
             build_timeout,
             usage_monitor: usage::UsageMonitor::new(),
         })
@@ -234,21 +208,21 @@ impl<'a> App<'a> {
             auto_scroll: self.conversation.auto_scroll,
         };
         // Show streaming text or spinner when busy
-        if self.busy != BusyState::Idle {
+        if self.claude.busy != BusyState::Idle {
             let spinner_char = SPINNER[self.spinner_frame % SPINNER.len()];
-            let msg = match self.busy {
+            let msg = match self.claude.busy {
                 BusyState::Thinking => {
-                    if self.streaming_text.is_empty() {
+                    if self.claude.streaming_text.is_empty() {
                         format!("{spinner_char} Thinking...")
                     } else {
-                        format!("{spinner_char} {}", self.streaming_text)
+                        format!("{spinner_char} {}", self.claude.streaming_text)
                     }
                 }
                 BusyState::Building => format!("{spinner_char} Building..."),
                 BusyState::Idle => unreachable!(),
             };
             conv.entries.push(crate::tui::conversation::ConversationEntry {
-                role: if self.streaming_text.is_empty() { "system" } else { "assistant" }.to_string(),
+                role: if self.claude.streaming_text.is_empty() { "system" } else { "assistant" }.to_string(),
                 content: msg,
             });
         }
@@ -304,9 +278,9 @@ impl<'a> App<'a> {
         }
 
         // Busy indicator
-        if self.busy != BusyState::Idle {
+        if self.claude.busy != BusyState::Idle {
             let spinner_char = SPINNER[self.spinner_frame % SPINNER.len()];
-            let (label, color) = match self.busy {
+            let (label, color) = match self.claude.busy {
                 BusyState::Thinking => ("Thinking", Color::Magenta),
                 BusyState::Building => ("Building", Color::Yellow),
                 BusyState::Idle => unreachable!(),
@@ -453,7 +427,7 @@ impl<'a> App<'a> {
                 return;
             }
             (Char('z'), KeyModifiers::CONTROL) => {
-                if self.busy == BusyState::Idle {
+                if self.claude.busy == BusyState::Idle {
                     if self.session.undo() {
                         self.conversation.add("system", "Undone last iteration.");
                         self.model_panel.clear();
@@ -467,17 +441,11 @@ impl<'a> App<'a> {
                 return;
             }
             (Char('c'), KeyModifiers::CONTROL) => {
-                if self.busy != BusyState::Idle {
+                if self.claude.busy != BusyState::Idle {
                     // Kill background process
-                    let pid = self.bg_pid.load(Ordering::SeqCst);
-                    if pid != 0 {
-                        unsafe {
-                            #[cfg(unix)]
-                            libc::kill(pid as i32, libc::SIGTERM);
-                        }
-                        self.conversation.add("system", "(cancelled)");
-                        self.busy = BusyState::Idle;
-                    }
+                    self.claude.cancel();
+                    self.conversation.add("system", "(cancelled)");
+                    self.claude.busy = BusyState::Idle;
                     self.last_ctrl_c = None;
                 } else {
                     // Double Ctrl+C to quit
@@ -792,7 +760,7 @@ impl<'a> App<'a> {
     }
 
     fn submit_prompt(&mut self, text: String) {
-        if self.busy != BusyState::Idle {
+        if self.claude.busy != BusyState::Idle {
             self.conversation.add("system", "Please wait for the current operation to finish.");
             return;
         }
@@ -913,7 +881,7 @@ impl<'a> App<'a> {
             self.session.reset();
             self.conversation.clear();
             self.model_panel.clear();
-            self.claude_session_id = None;
+            self.claude.session_id = None;
             self.active_session_name = None;
             self.active_session_dir = None;
             self.phase_session = None;
@@ -1095,57 +1063,39 @@ impl<'a> App<'a> {
 
         // Research new component via Claude
         self.conversation.add("system", &format!("Researching '{query}'..."));
-        self.busy = BusyState::Thinking;
-        self.streaming_text.clear();
 
-        let model = self.claude_model.clone();
-        let tx = self.bg_tx.clone();
-        let stream_tx = self.stream_tx.clone();
-        let bg_pid = Arc::clone(&self.bg_pid);
         let name = query.to_string();
-        let images = attached_images;
+        let research_prompt = format!(
+            "Research the component: {name}\n\
+             Find official datasheet or technical drawing.\n\
+             Extract ALL mechanical dimensions in millimeters and key constraints.\n\
+             Return the data as a TOML block in this exact format:\n\
+             ```toml\n\
+             [identity]\n\
+             name = \"full component name\"\n\
+             manufacturer = \"...\"\n\
+             part_number = \"...\"\n\
+             category = \"motor|fastener|bearing|connector|other\"\n\
+             created = \"\"\n\
+             updated = \"\"\n\n\
+             [dimensions]\n\
+             units = \"mm\"\n\
+             key_name = value\n\n\
+             [constraints]\n\
+             key_with_unit_suffix = value\n\n\
+             [sources]\n\
+             urls = [\"...\"]\n\
+             notes = \"...\"\n\
+             ```\n\
+             Return ONLY the TOML block, nothing else."
+        );
 
-        std::thread::spawn(move || {
-            let research_prompt = format!(
-                "Research the component: {name}\n\
-                 Find official datasheet or technical drawing.\n\
-                 Extract ALL mechanical dimensions in millimeters and key constraints.\n\
-                 Return the data as a TOML block in this exact format:\n\
-                 ```toml\n\
-                 [identity]\n\
-                 name = \"full component name\"\n\
-                 manufacturer = \"...\"\n\
-                 part_number = \"...\"\n\
-                 category = \"motor|fastener|bearing|connector|other\"\n\
-                 created = \"\"\n\
-                 updated = \"\"\n\n\
-                 [dimensions]\n\
-                 units = \"mm\"\n\
-                 key_name = value\n\n\
-                 [constraints]\n\
-                 key_with_unit_suffix = value\n\n\
-                 [sources]\n\
-                 urls = [\"...\"]\n\
-                 notes = \"...\"\n\
-                 ```\n\
-                 Return ONLY the TOML block, nothing else."
-            );
-
-            let result = claude::send_prompt(
-                &model,
-                "You are a technical reference researcher. Search for component datasheets and extract precise mechanical specifications.",
-                None,
-                &research_prompt,
-                &images,
-                Some(&stream_tx),
-                Some(&bg_pid),
-            );
-            bg_pid.store(0, Ordering::SeqCst);
-            let _ = tx.send(BackgroundResult::ReferenceResearch {
-                name,
-                result: result.map(|(response, _sid)| response),
-            });
-        });
+        self.claude.send_raw_prompt(
+            "You are a technical reference researcher. Search for component datasheets and extract precise mechanical specifications.",
+            &research_prompt,
+            &attached_images,
+            &name,
+        );
     }
 
     fn save_pending_reference(&mut self, pending: PendingReference) {
@@ -1221,19 +1171,9 @@ impl<'a> App<'a> {
     }
 
     fn send_spec_prompt(&mut self, text: &str, images: Vec<PathBuf>) {
-        self.busy = BusyState::Thinking;
-        self.streaming_text.clear();
-
-        let model = self.claude_model.clone();
-        let session_id = self.claude_session_id.clone();
-        let tx = self.bg_tx.clone();
-        let stream_tx = self.stream_tx.clone();
-        let bg_pid = Arc::clone(&self.bg_pid);
-
-        // Build reference context for prompt injection
         let ref_context = self.build_ref_context();
 
-        let prompt = if session_id.is_some() {
+        let prompt = if self.claude.session_id.is_some() {
             if let Some(ref ctx) = ref_context {
                 format!("[Reference context]\n{}\n\n{}", ctx, text)
             } else {
@@ -1243,73 +1183,11 @@ impl<'a> App<'a> {
             text.to_string()
         };
 
-        std::thread::spawn(move || {
-            let result = claude::send_with_phase_prompt(
-                &model,
-                "spec",
-                session_id.as_deref(),
-                &prompt,
-                &images,
-                Some(&stream_tx),
-                Some(&bg_pid),
-                ref_context.as_deref(),
-            );
-            bg_pid.store(0, Ordering::SeqCst);
-            match result {
-                Ok((response, new_sid)) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Ok(response),
-                        session_id: new_sid.or(session_id),
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Err(e),
-                        session_id: None,
-                    });
-                }
-            }
-        });
+        self.claude.send_phase_prompt("spec", &prompt, &images, ref_context.as_deref());
     }
 
     fn send_decompose_prompt(&mut self, text: &str) {
-        self.busy = BusyState::Thinking;
-        self.streaming_text.clear();
-
-        let model = self.claude_model.clone();
-        let session_id = self.claude_session_id.clone();
-        let tx = self.bg_tx.clone();
-        let stream_tx = self.stream_tx.clone();
-        let bg_pid = Arc::clone(&self.bg_pid);
-        let prompt = text.to_string();
-
-        std::thread::spawn(move || {
-            let result = claude::send_with_phase_prompt(
-                &model,
-                "decompose",
-                session_id.as_deref(),
-                &prompt,
-                &[],
-                Some(&stream_tx),
-                Some(&bg_pid),
-                None,
-            );
-            bg_pid.store(0, Ordering::SeqCst);
-            match result {
-                Ok((response, new_sid)) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Ok(response),
-                        session_id: new_sid.or(session_id),
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Err(e),
-                        session_id: None,
-                    });
-                }
-            }
-        });
+        self.claude.send_phase_prompt("decompose", text, &[], None);
     }
 
     fn handle_spec_response(&mut self, response: &str) {
@@ -1352,7 +1230,7 @@ impl<'a> App<'a> {
             // Transition to Decompose
             self.phase = Phase::Decompose;
             self.layout_config.phase = Phase::Decompose;
-            self.claude_session_id = None; // Fresh session for Decompose
+            self.claude.session_id = None; // Fresh session for Decompose
             self.save_phase_session();
         } else {
             // Append Claude's response to the spec panel for visibility
@@ -1433,7 +1311,7 @@ impl<'a> App<'a> {
         self.conversation.add("system", "Component structure approved! Transitioning to Component phase.");
         self.phase = Phase::Component;
         self.layout_config.phase = Phase::Component;
-        self.claude_session_id = None; // Fresh session for Component phase
+        self.claude.session_id = None; // Fresh session for Component phase
         self.save_phase_session();
     }
 
@@ -1442,7 +1320,7 @@ impl<'a> App<'a> {
             BackgroundResult::ClaudeResponse { result, session_id } => {
                 // Update session_id
                 if let Some(sid) = session_id {
-                    self.claude_session_id = Some(sid);
+                    self.claude.session_id = Some(sid);
                 }
 
                 match result {
@@ -1458,45 +1336,45 @@ impl<'a> App<'a> {
                         match self.phase {
                             Phase::Spec => {
                                 self.handle_spec_response(&response);
-                                self.busy = BusyState::Idle;
+                                self.claude.busy = BusyState::Idle;
                             }
                             Phase::Decompose => {
                                 self.handle_decompose_response(&response);
-                                self.busy = BusyState::Idle;
+                                self.claude.busy = BusyState::Idle;
                             }
                             Phase::Component => {
                                 // Parse response for cadquery code block
                                 let parsed = parser::parse_response(&response);
                                 if let Some(code_block) = parsed.code {
                                     // Build the component
-                                    self.busy = BusyState::Building;
+                                    self.claude.busy = BusyState::Building;
                                     let build_result = self.session.build(&code_block.code, code_block.engine);
                                     self.handle_component_build_result(build_result, code_block.code);
                                 } else {
                                     // No code in response — just a conversation message
-                                    self.busy = BusyState::Idle;
+                                    self.claude.busy = BusyState::Idle;
                                 }
                             }
                             Phase::Assembly => {
                                 // Assembly responses may contain code to rebuild, or just conversation
                                 let parsed = parser::parse_response(&response);
                                 if let Some(code_block) = parsed.code {
-                                    self.busy = BusyState::Building;
+                                    self.claude.busy = BusyState::Building;
                                     let result = self.session.build(&code_block.code, code_block.engine);
                                     self.handle_build_result(result);
                                 } else {
-                                    self.busy = BusyState::Idle;
+                                    self.claude.busy = BusyState::Idle;
                                 }
                             }
                             Phase::Refinement => {
                                 // Refinement responses may contain updated code
                                 let parsed = parser::parse_response(&response);
                                 if let Some(code_block) = parsed.code {
-                                    self.busy = BusyState::Building;
+                                    self.claude.busy = BusyState::Building;
                                     let result = self.session.build(&code_block.code, code_block.engine);
                                     self.handle_build_result(result);
                                 } else {
-                                    self.busy = BusyState::Idle;
+                                    self.claude.busy = BusyState::Idle;
                                 }
                             }
                             // All phases are explicitly handled above — no catch-all build path.
@@ -1504,7 +1382,7 @@ impl<'a> App<'a> {
                     }
                     Err(e) => {
                         self.conversation.add("system", &format!("Claude error: {e}"));
-                        self.busy = BusyState::Idle;
+                        self.claude.busy = BusyState::Idle;
                     }
                 }
             }
@@ -1525,7 +1403,7 @@ impl<'a> App<'a> {
                         self.conversation.add("system", &format!("Research failed: {e}"));
                     }
                 }
-                self.busy = BusyState::Idle;
+                self.claude.busy = BusyState::Idle;
             }
         }
     }
@@ -1562,7 +1440,7 @@ impl<'a> App<'a> {
                 // Auto-save (legacy session)
                 if let Some(ref session_dir) = self.active_session_dir.clone() {
                     let session_name = self.active_session_name.clone().unwrap_or_else(|| "session".to_string());
-                    let claude_sid = self.claude_session_id.clone();
+                    let claude_sid = self.claude.session_id.clone();
                     if let Err(e) = self.session.save_to(session_dir, &session_name, claude_sid.as_deref()) {
                         self.conversation.add("system", &format!("Warning: auto-save failed: {e}"));
                     } else {
@@ -1579,7 +1457,7 @@ impl<'a> App<'a> {
                 self.conversation.add("system", "Build timed out.");
             }
         }
-        self.busy = BusyState::Idle;
+        self.claude.busy = BusyState::Idle;
     }
 
     fn load_session(&mut self, project_idx: usize, session_name: String) {
@@ -1633,7 +1511,7 @@ impl<'a> App<'a> {
                     }
 
                     self.session = loaded_session;
-                    self.claude_session_id = claude_session_id;
+                    self.claude.session_id = claude_session_id;
                     self.active_project_idx = Some(project_idx);
                     self.active_session_name = Some(session_name.clone());
                     self.active_session_dir = Some(session_dir);
@@ -1716,7 +1594,7 @@ impl<'a> App<'a> {
             self.active_project_idx = Some(project_idx);
             self.active_session_name = None;
             self.active_session_dir = None;
-            self.claude_session_id = None;
+            self.claude.session_id = None;
 
             // Reset session state
             self.session.reset();
@@ -1835,13 +1713,7 @@ impl<'a> App<'a> {
 
     /// Kill any running Claude subprocess on app exit.
     fn cleanup(&self) {
-        let pid = self.bg_pid.load(Ordering::SeqCst);
-        if pid != 0 {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
-        }
+        self.claude.cancel();
     }
 
     /// Copy the in-memory conversation pane entries into the PhaseSession's
@@ -1904,7 +1776,7 @@ impl<'a> App<'a> {
             self.conversation.add("system", "Assembly approved! Transitioning to Refinement phase.");
             self.phase = Phase::Refinement;
             self.layout_config.phase = Phase::Refinement;
-            self.claude_session_id = None;
+            self.claude.session_id = None;
             self.save_phase_session();
         } else {
             // Send feedback about assembly to Claude
@@ -1913,43 +1785,7 @@ impl<'a> App<'a> {
     }
 
     fn send_assembly_feedback(&mut self, text: &str) {
-        self.busy = BusyState::Thinking;
-        self.streaming_text.clear();
-
-        let model = self.claude_model.clone();
-        let session_id = self.claude_session_id.clone();
-        let tx = self.bg_tx.clone();
-        let stream_tx = self.stream_tx.clone();
-        let bg_pid = Arc::clone(&self.bg_pid);
-        let prompt = text.to_string();
-
-        std::thread::spawn(move || {
-            let result = claude::send_with_phase_prompt(
-                &model,
-                "assembly",
-                session_id.as_deref(),
-                &prompt,
-                &[],
-                Some(&stream_tx),
-                Some(&bg_pid),
-                None,
-            );
-            bg_pid.store(0, Ordering::SeqCst);
-            match result {
-                Ok((response, new_sid)) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Ok(response),
-                        session_id: new_sid.or(session_id),
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Err(e),
-                        session_id: None,
-                    });
-                }
-            }
-        });
+        self.claude.send_phase_prompt("assembly", text, &[], None);
     }
 
     fn handle_refinement_input(&mut self, text: &str) {
@@ -1998,43 +1834,7 @@ impl<'a> App<'a> {
     }
 
     fn send_refinement_feedback(&mut self, text: &str) {
-        self.busy = BusyState::Thinking;
-        self.streaming_text.clear();
-
-        let model = self.claude_model.clone();
-        let session_id = self.claude_session_id.clone();
-        let tx = self.bg_tx.clone();
-        let stream_tx = self.stream_tx.clone();
-        let bg_pid = Arc::clone(&self.bg_pid);
-        let prompt = text.to_string();
-
-        std::thread::spawn(move || {
-            let result = claude::send_with_phase_prompt(
-                &model,
-                "refinement",
-                session_id.as_deref(),
-                &prompt,
-                &[],
-                Some(&stream_tx),
-                Some(&bg_pid),
-                None,
-            );
-            bg_pid.store(0, Ordering::SeqCst);
-            match result {
-                Ok((response, new_sid)) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Ok(response),
-                        session_id: new_sid.or(session_id),
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Err(e),
-                        session_id: None,
-                    });
-                }
-            }
-        });
+        self.claude.send_phase_prompt("refinement", text, &[], None);
     }
 
     fn handle_export(&mut self) {
@@ -2074,92 +1874,17 @@ impl<'a> App<'a> {
     }
 
     fn send_component_prompt(&mut self, text: &str, images: Vec<PathBuf>) {
-        self.busy = BusyState::Thinking;
-        self.streaming_text.clear();
-
-        let model = self.claude_model.clone();
-        let session_id = self.claude_session_id.clone();
-        let tx = self.bg_tx.clone();
-        let stream_tx = self.stream_tx.clone();
-        let bg_pid = Arc::clone(&self.bg_pid);
-        let prompt = text.to_string();
-
-        std::thread::spawn(move || {
-            let result = claude::send_with_phase_prompt(
-                &model,
-                "component",
-                session_id.as_deref(),
-                &prompt,
-                &images,
-                Some(&stream_tx),
-                Some(&bg_pid),
-                None,
-            );
-            bg_pid.store(0, Ordering::SeqCst);
-            match result {
-                Ok((response, new_sid)) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Ok(response),
-                        session_id: new_sid.or(session_id),
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Err(e),
-                        session_id: None,
-                    });
-                }
-            }
-        });
+        self.claude.send_phase_prompt("component", text, &images, None);
     }
 
     fn send_component_feedback(&mut self, text: &str, images: Vec<PathBuf>) {
-        self.busy = BusyState::Thinking;
-        self.streaming_text.clear();
-
-        let model = self.claude_model.clone();
-        let session_id = self.claude_session_id.clone();
-        let tx = self.bg_tx.clone();
-        let stream_tx = self.stream_tx.clone();
-        let bg_pid = Arc::clone(&self.bg_pid);
-        let prompt = text.to_string();
-
         // Use "component" prompt for initial generation, "refinement" for feedback
-        // If we already have code for this component, use refinement
-        let phase_prompt = if self.session.current_code.is_some() {
+        let phase_name = if self.session.current_code.is_some() {
             "refinement"
         } else {
             "component"
         };
-        let phase_name = phase_prompt.to_string();
-
-        std::thread::spawn(move || {
-            let result = claude::send_with_phase_prompt(
-                &model,
-                &phase_name,
-                session_id.as_deref(),
-                &prompt,
-                &images,
-                Some(&stream_tx),
-                Some(&bg_pid),
-                None,
-            );
-            bg_pid.store(0, Ordering::SeqCst);
-            match result {
-                Ok((response, new_sid)) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Ok(response),
-                        session_id: new_sid.or(session_id),
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(BackgroundResult::ClaudeResponse {
-                        result: Err(e),
-                        session_id: None,
-                    });
-                }
-            }
-        });
+        self.claude.send_phase_prompt(phase_name, text, &images, None);
     }
 
     fn handle_component_build_result(&mut self, build_result: python::BuildResult, _code: String) {
@@ -2192,7 +1917,7 @@ impl<'a> App<'a> {
                 self.conversation.add("system", "Build timed out.");
             }
         }
-        self.busy = BusyState::Idle;
+        self.claude.busy = BusyState::Idle;
     }
 
     fn approve_current_component(&mut self) {
@@ -2213,7 +1938,7 @@ impl<'a> App<'a> {
         if current + 1 < total {
             // Move to next component
             self.component_list.select_next();
-            self.claude_session_id = None; // Fresh session for next component
+            self.claude.session_id = None; // Fresh session for next component
             self.conversation.add("system", &format!(
                 "Component approved! Moving to component {}/{}.",
                 current + 2, total
@@ -2226,7 +1951,7 @@ impl<'a> App<'a> {
             self.conversation.add("system", "All components approved! Transitioning to Assembly phase.");
             self.phase = Phase::Assembly;
             self.layout_config.phase = Phase::Assembly;
-            self.claude_session_id = None;
+            self.claude.session_id = None;
             self.save_phase_session();
         }
     }
@@ -2317,13 +2042,10 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
     eprintln!("Warning: {warn}");
     let python_path = config.python_path();
     let projects = storage::project::list_projects().unwrap_or_default();
-    let (bg_tx, bg_rx) = mpsc::channel::<BackgroundResult>();
-    let (stream_tx, stream_rx) = mpsc::channel::<String>();
     let mut pt = ProjectTreePane::new();
     pt.refresh(&projects);
     App {
         focus: Focus::Input,
-        busy: BusyState::Idle,
         layout_config: LayoutConfig::default(),
         phase: Phase::Spec,
         project_tree: pt,
@@ -2335,17 +2057,11 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         component_list: ComponentListPanel::new(),
         session: Session::new(60, python_path.clone()),
         phase_session: None,
-        claude_model: config.claude.model.clone(),
         claude_system_prompt: String::new(),
-        claude_session_id: None,
+        claude: claude_bridge::ClaudeBridge::new(config.claude.model.clone()),
         viewer: Viewer::new(&config.viewer.command),
         pending_images: Vec::new(),
         python_path,
-        bg_tx,
-        bg_rx,
-        stream_tx,
-        stream_rx,
-        bg_pid: Arc::new(AtomicU32::new(0)),
         projects,
         active_project_idx: None,
         active_session_name: None,
@@ -2361,7 +2077,6 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         save_part_pending: false,
         active_refs: Vec::new(),
         ref_confirm_pending: None,
-        streaming_text: String::new(),
         build_timeout: 60,
         usage_monitor: usage::UsageMonitor::new(),
     }
@@ -2432,18 +2147,13 @@ fn run_event_loop(
         terminal.draw(|f| app.render(f))?;
 
         // Drain streaming text chunks from Claude
-        let mut got_stream = false;
-        while let Ok(chunk) = app.stream_rx.try_recv() {
-            app.streaming_text.push_str(&chunk);
-            got_stream = true;
-        }
-        if got_stream {
+        if app.claude.drain_streaming() {
             app.conversation.scroll_to_bottom();
         }
 
         // Check background channel (final result)
-        if let Ok(result) = app.bg_rx.try_recv() {
-            app.streaming_text.clear();
+        if let Some(result) = app.claude.try_recv_result() {
+            app.claude.streaming_text.clear();
             app.handle_bg_result(result);
         }
 
@@ -2461,7 +2171,7 @@ fn run_event_loop(
         }
 
         // Advance spinner
-        if app.busy != BusyState::Idle {
+        if app.claude.busy != BusyState::Idle {
             app.spinner_frame = app.spinner_frame.wrapping_add(1);
         }
 

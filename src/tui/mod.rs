@@ -30,10 +30,3 @@ pub enum BackgroundResult {
     },
 }
 
-/// Whether a background task is running.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BusyState {
-    Idle,
-    Thinking,
-    Building,
-}
