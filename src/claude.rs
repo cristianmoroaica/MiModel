@@ -202,6 +202,7 @@ pub fn send_prompt(
     let mut full_text = String::new();
     let mut captured_session_id: Option<String> = None;
     let mut last_assistant_text = String::new();
+    let mut had_tool_calls = false;
 
     for line in reader.lines() {
         let line = match line {
@@ -242,6 +243,7 @@ pub fn send_prompt(
                                         input: block.get("input").cloned().unwrap_or(serde_json::Value::Null),
                                     };
                                     let _ = tool_tx.send(tc);
+                                    had_tool_calls = true;
                                 }
                             }
                         }
@@ -280,7 +282,7 @@ pub fn send_prompt(
         full_text = last_assistant_text;
     }
 
-    if full_text.is_empty() {
+    if full_text.is_empty() && !had_tool_calls {
         return Err("No response from claude".to_string());
     }
 
