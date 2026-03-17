@@ -29,6 +29,9 @@ pub struct PhaseSession {
 impl PhaseSession {
     /// Create a new phase session, setting up base_dir, components/, and assembly/ directories.
     pub fn new(base_dir: PathBuf, build_timeout: u64, python_path: String) -> Self {
+        // Ensure base directory and subdirs exist
+        fs::create_dir_all(&base_dir)
+            .expect("Failed to create session directory");
         fs::create_dir_all(base_dir.join("components"))
             .expect("Failed to create components directory");
         fs::create_dir_all(base_dir.join("assembly"))
