@@ -1183,6 +1183,42 @@ impl<'a> App<'a> {
         }
     }
 
+    fn build_ref_context(&self) -> Option<String> {
+        let library = reference::load_library().unwrap_or_default();
+        if library.is_empty() && self.active_refs.is_empty() {
+            return None;
+        }
+
+        let mut parts = Vec::new();
+
+        // Active references — full specs
+        if !self.active_refs.is_empty() {
+            let active: Vec<&reference::ReferenceComponent> = library.iter()
+                .filter(|(_, slug)| self.active_refs.contains(slug))
+                .map(|(comp, _)| comp)
+                .collect();
+            if !active.is_empty() {
+                parts.push(format!(
+                    "## Active Reference Components (use these dimensions)\n{}",
+                    reference::summarize_for_prompt(&active)
+                ));
+            }
+        }
+
+        // All references — names only
+        let all_refs: Vec<&reference::ReferenceComponent> = library.iter()
+            .map(|(comp, _)| comp)
+            .collect();
+        if !all_refs.is_empty() {
+            parts.push(format!(
+                "## Available in Reference Library\n{}",
+                reference::list_names(&all_refs)
+            ));
+        }
+
+        if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
+    }
+
     fn send_spec_prompt(&mut self, text: &str, images: Vec<PathBuf>) {
         self.busy = BusyState::Thinking;
         self.streaming_text.clear();
@@ -1192,7 +1228,19 @@ impl<'a> App<'a> {
         let tx = self.bg_tx.clone();
         let stream_tx = self.stream_tx.clone();
         let bg_pid = Arc::clone(&self.bg_pid);
-        let prompt = text.to_string();
+
+        // Build reference context for prompt injection
+        let ref_context = self.build_ref_context();
+
+        let prompt = if session_id.is_some() {
+            if let Some(ref ctx) = ref_context {
+                format!("[Reference context]\n{}\n\n{}", ctx, text)
+            } else {
+                text.to_string()
+            }
+        } else {
+            text.to_string()
+        };
 
         std::thread::spawn(move || {
             let result = claude::send_with_phase_prompt(
@@ -1203,6 +1251,7 @@ impl<'a> App<'a> {
                 &images,
                 Some(&stream_tx),
                 Some(&bg_pid),
+                ref_context.as_deref(),
             );
             bg_pid.store(0, Ordering::SeqCst);
             match result {
@@ -1242,6 +1291,7 @@ impl<'a> App<'a> {
                 &[],
                 Some(&stream_tx),
                 Some(&bg_pid),
+                None,
             );
             bg_pid.store(0, Ordering::SeqCst);
             match result {
@@ -1270,6 +1320,25 @@ impl<'a> App<'a> {
                 "Code block ignored — Spec phase collects requirements only. Move to Component phase to build.");
         }
         let clean_response = if parsed.text.is_empty() { response } else { &parsed.text };
+
+        // Auto-detect external component references
+        let known_slugs: Vec<String> = reference::load_library()
+            .unwrap_or_default()
+            .iter()
+            .map(|(_, slug)| slug.clone())
+            .collect();
+        let detected = reference_detect::detect_references(clean_response, &known_slugs);
+        for det in &detected {
+            if det.in_library {
+                self.conversation.add("system",
+                    &format!("Reference available: {} (use /ref {} to load)", det.name,
+                        reference::slug_from_name(&det.name)));
+            } else {
+                self.conversation.add("system",
+                    &format!("Detected component: {}. Use /ref {} to research and save.",
+                        det.name, reference::slug_from_name(&det.name)));
+            }
+        }
 
         // Update spec panel with the running conversation
         let mut spec_content = self.spec_panel.content().to_string();
@@ -1862,6 +1931,7 @@ impl<'a> App<'a> {
                 &[],
                 Some(&stream_tx),
                 Some(&bg_pid),
+                None,
             );
             bg_pid.store(0, Ordering::SeqCst);
             match result {
@@ -1946,6 +2016,7 @@ impl<'a> App<'a> {
                 &[],
                 Some(&stream_tx),
                 Some(&bg_pid),
+                None,
             );
             bg_pid.store(0, Ordering::SeqCst);
             match result {
@@ -2021,6 +2092,7 @@ impl<'a> App<'a> {
                 &images,
                 Some(&stream_tx),
                 Some(&bg_pid),
+                None,
             );
             bg_pid.store(0, Ordering::SeqCst);
             match result {
@@ -2069,6 +2141,7 @@ impl<'a> App<'a> {
                 &images,
                 Some(&stream_tx),
                 Some(&bg_pid),
+                None,
             );
             bg_pid.store(0, Ordering::SeqCst);
             match result {

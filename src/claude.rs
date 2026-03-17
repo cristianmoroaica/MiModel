@@ -277,8 +277,14 @@ pub fn send_with_phase_prompt(
     image_paths: &[PathBuf],
     on_text: Option<&std::sync::mpsc::Sender<String>>,
     pid_out: Option<&std::sync::Arc<std::sync::atomic::AtomicU32>>,
+    ref_context: Option<&str>,
 ) -> Result<(String, Option<String>), String> {
-    let system_prompt = crate::prompt_builder::load_phase_system_prompt(phase_name)?;
+    let mut system_prompt = crate::prompt_builder::load_phase_system_prompt(phase_name)?;
+
+    if let Some(ctx) = ref_context {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(ctx);
+    }
 
     // If we have a session_id, try resuming first
     if let Some(sid) = session_id {
@@ -352,6 +358,7 @@ mod tests {
             &Option<String>, &str, Option<&str>, &str, &[PathBuf],
             Option<&std::sync::mpsc::Sender<String>>,
             Option<&std::sync::Arc<std::sync::atomic::AtomicU32>>,
+            Option<&str>,
         ) -> Result<(String, Option<String>), String> = send_with_phase_prompt;
     }
 
