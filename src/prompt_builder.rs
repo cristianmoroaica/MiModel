@@ -192,6 +192,6 @@ mod tests {
     fn test_load_system_prompt() {
         let prompt = load_phase_system_prompt("spec");
         assert!(prompt.is_ok());
-        assert!(prompt.unwrap().contains("ONE question at a time"));
+        assert!(prompt.unwrap().contains("ask_question"));
     }
 }
