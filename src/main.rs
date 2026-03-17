@@ -1058,6 +1058,14 @@ impl<'a> App<'a> {
 
             match self.session.load(&session_dir, self.build_timeout, self.python_path.clone()) {
                 Ok(()) => {
+                    // Clear any pending operations from before the load
+                    self.new_project_pending = false;
+                    self.new_session_pending = false;
+                    self.save_part_pending = false;
+                    self.rename_pending = None;
+                    self.delete_pending = None;
+                    self.ref_confirm_pending = None;
+
                     let phase = self.session.phase_session.as_ref()
                         .map(|ps| ps.phase)
                         .unwrap_or(Phase::Spec);
@@ -1112,6 +1120,14 @@ impl<'a> App<'a> {
 
     fn open_project(&mut self, project_idx: usize) {
         if let Some(project) = self.projects.get(project_idx) {
+            // Clear any pending operations
+            self.new_project_pending = false;
+            self.new_session_pending = false;
+            self.save_part_pending = false;
+            self.rename_pending = None;
+            self.delete_pending = None;
+            self.ref_confirm_pending = None;
+
             // Set active project so new prompts land here
             self.session.project_idx = Some(project_idx);
             self.session.active_name = None;
