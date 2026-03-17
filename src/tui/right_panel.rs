@@ -139,21 +139,21 @@ impl RightPanel {
         let content = match self.active_tab {
             RightTab::Spec => {
                 if self.spec_content.is_empty() {
-                    "No spec content yet."
+                    "Spec fields will appear here as the design conversation progresses."
                 } else {
                     &self.spec_content
                 }
             }
             RightTab::Refs => {
                 if self.refs_content.is_empty() {
-                    "No references loaded. Use /ref <name> to load."
+                    "No active references.\nUse /ref <name> to research and load component specs."
                 } else {
                     &self.refs_content
                 }
             }
             RightTab::Model => {
                 if self.model_content.is_empty() {
-                    "No model built yet."
+                    "No model built yet.\nModel dimensions and preview will appear after building."
                 } else {
                     &self.model_content
                 }

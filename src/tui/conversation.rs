@@ -80,11 +80,18 @@ impl ConversationPane {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color))
-            .title_style(Style::default().fg(Color::Rgb(147, 153, 178)))
             .border_type(ratatui::widgets::BorderType::Rounded);
 
         // Build styled text
         let mut lines: Vec<Line> = Vec::new();
+
+        // Empty state
+        if self.entries.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled("  Select a project or start typing to begin.", Style::default().fg(Color::Rgb(88, 91, 112))),
+            ]));
+        }
         for entry in &self.entries {
             match entry.role.as_str() {
                 "user" => {
