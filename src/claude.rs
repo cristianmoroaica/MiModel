@@ -86,6 +86,9 @@ impl ClaudeClient {
             image_paths,
             None,
             None,
+            None,
+            None,
+            false,
         )?;
         if let Some(sid) = new_sid {
             self.session_id = Some(sid);
@@ -130,6 +133,9 @@ pub fn send_prompt(
     image_paths: &[PathBuf],
     on_text: Option<&std::sync::mpsc::Sender<String>>,
     pid_out: Option<&std::sync::Arc<std::sync::atomic::AtomicU32>>,
+    on_tool: Option<&std::sync::mpsc::Sender<super::claude_bridge::ToolCall>>,
+    mcp_config: Option<&std::path::Path>,
+    disable_builtin_tools: bool,
 ) -> Result<(String, Option<String>), String> {
     let full_prompt = if image_paths.is_empty() {
         prompt.to_string()
@@ -161,6 +167,15 @@ pub fn send_prompt(
         if let Some(parent) = path.parent() {
             cmd.arg("--add-dir").arg(parent);
         }
+    }
+
+    if disable_builtin_tools {
+        cmd.arg("--tools").arg("");
+        cmd.arg("--strict-mcp-config");
+        cmd.arg("--disallowedTools").arg("LSP");
+    }
+    if let Some(config_path) = mcp_config {
+        cmd.arg("--mcp-config").arg(config_path);
     }
 
     if let Some(sid) = session_id {
@@ -218,6 +233,16 @@ pub fn send_prompt(
                         for block in arr {
                             if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                                 new_text.push_str(text);
+                            }
+                            // Parse tool_use content blocks from MCP
+                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                                if let Some(tool_tx) = on_tool {
+                                    let tc = crate::claude_bridge::ToolCall {
+                                        name: block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+                                        input: block.get("input").cloned().unwrap_or(serde_json::Value::Null),
+                                    };
+                                    let _ = tool_tx.send(tc);
+                                }
                             }
                         }
                         // Send only the new delta
@@ -278,6 +303,9 @@ pub fn send_with_phase_prompt(
     on_text: Option<&std::sync::mpsc::Sender<String>>,
     pid_out: Option<&std::sync::Arc<std::sync::atomic::AtomicU32>>,
     ref_context: Option<&str>,
+    on_tool: Option<&std::sync::mpsc::Sender<super::claude_bridge::ToolCall>>,
+    mcp_config: Option<&std::path::Path>,
+    disable_builtin_tools: bool,
 ) -> Result<(String, Option<String>), String> {
     let mut system_prompt = crate::prompt_builder::load_phase_system_prompt(phase_name)?;
 
@@ -288,7 +316,7 @@ pub fn send_with_phase_prompt(
 
     // If we have a session_id, try resuming first
     if let Some(sid) = session_id {
-        match send_prompt(model, &system_prompt, Some(sid), prompt, image_paths, on_text, pid_out) {
+        match send_prompt(model, &system_prompt, Some(sid), prompt, image_paths, on_text, pid_out, on_tool, mcp_config, disable_builtin_tools) {
             Ok(result) => return Ok(result),
             Err(e) => {
                 // Check for session expiry indicators
@@ -297,14 +325,14 @@ pub fn send_with_phase_prompt(
                     || lower.contains("invalid session")
                 {
                     // Retry without --resume (fresh session)
-                    return send_prompt(model, &system_prompt, None, prompt, image_paths, on_text, pid_out);
+                    return send_prompt(model, &system_prompt, None, prompt, image_paths, on_text, pid_out, on_tool, mcp_config, disable_builtin_tools);
                 }
                 return Err(e);
             }
         }
     }
 
-    send_prompt(model, &system_prompt, None, prompt, image_paths, on_text, pid_out)
+    send_prompt(model, &system_prompt, None, prompt, image_paths, on_text, pid_out, on_tool, mcp_config, disable_builtin_tools)
 }
 
 /// Check that the claude CLI is available.
@@ -348,6 +376,9 @@ mod tests {
             &Option<String>, &str, Option<&str>, &str, &[PathBuf],
             Option<&std::sync::mpsc::Sender<String>>,
             Option<&std::sync::Arc<std::sync::atomic::AtomicU32>>,
+            Option<&std::sync::mpsc::Sender<crate::claude_bridge::ToolCall>>,
+            Option<&std::path::Path>,
+            bool,
         ) -> Result<(String, Option<String>), String> = send_prompt;
     }
 
@@ -359,6 +390,9 @@ mod tests {
             Option<&std::sync::mpsc::Sender<String>>,
             Option<&std::sync::Arc<std::sync::atomic::AtomicU32>>,
             Option<&str>,
+            Option<&std::sync::mpsc::Sender<crate::claude_bridge::ToolCall>>,
+            Option<&std::path::Path>,
+            bool,
         ) -> Result<(String, Option<String>), String> = send_with_phase_prompt;
     }
 

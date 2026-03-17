@@ -1002,6 +1002,35 @@ impl<'a> App<'a> {
         self.session.add_message(self.phase, "user", &clean_text);
         self.session.save(self.phase);
 
+        // Handle 'advance' command to move between phases
+        if clean_text.trim().eq_ignore_ascii_case("advance") {
+            match self.phase {
+                Phase::Spec => {
+                    self.phase = Phase::Decompose;
+                    self.layout_config.phase = Phase::Decompose;
+                    self.claude.session_id = None;
+                    self.conversation.add("system", "Advanced to Decompose phase.");
+                    self.session.save(self.phase);
+                    self.dirty = true;
+                }
+                Phase::Decompose => {
+                    self.conversation.add("system", "Use 'approve' to accept the component tree first.");
+                }
+                Phase::Assembly => {
+                    self.phase = Phase::Refinement;
+                    self.layout_config.phase = Phase::Refinement;
+                    self.claude.session_id = None;
+                    self.conversation.add("system", "Advanced to Refinement phase.");
+                    self.session.save(self.phase);
+                    self.dirty = true;
+                }
+                _ => {
+                    self.conversation.add("system", "Cannot advance from this phase.");
+                }
+            }
+            return;
+        }
+
         // Phase-specific dispatch
         match self.phase {
             Phase::Spec => {
@@ -1328,11 +1357,19 @@ impl<'a> App<'a> {
             text.to_string()
         };
 
-        self.claude.send_phase_prompt("spec", &prompt, &images, ref_context.as_deref());
+        let session_dir = self.session.active_dir.clone();
+        let mcp_config = claude_bridge::generate_mcp_config(
+            "spec", session_dir.as_deref()
+        ).ok();
+        self.claude.send_phase_prompt("spec", &prompt, &images, ref_context.as_deref(), mcp_config);
     }
 
     fn send_decompose_prompt(&mut self, text: &str) {
-        self.claude.send_phase_prompt("decompose", text, &[], None);
+        let session_dir = self.session.active_dir.clone();
+        let mcp_config = claude_bridge::generate_mcp_config(
+            "decompose", session_dir.as_deref()
+        ).ok();
+        self.claude.send_phase_prompt("decompose", text, &[], None, mcp_config);
     }
 
     fn handle_spec_response(&mut self, response: &str) {
@@ -1816,6 +1853,77 @@ impl<'a> App<'a> {
         self.right_panel.set_refs(&lines.join("\n"));
     }
 
+    /// Dispatch an MCP tool call from Claude's stream to the appropriate handler.
+    fn handle_tool_call(&mut self, tool: claude_bridge::ToolCall) {
+        // Strip mcp__mimodel__ prefix
+        let name = tool.name.strip_prefix("mcp__mimodel__").unwrap_or(&tool.name);
+
+        match name {
+            "ask_question" | "ask_clarification" => {
+                if let Some(q) = tool.input.get("question").and_then(|v| v.as_str()) {
+                    self.session.add_message(self.phase, "assistant", q);
+                    self.conversation.add("assistant", q);
+                }
+            }
+            "record_spec_field" => {
+                let cat = tool.input.get("category").and_then(|v| v.as_str()).unwrap_or("");
+                let key = tool.input.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                let val = tool.input.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                let unit = tool.input.get("unit").and_then(|v| v.as_str()).unwrap_or("");
+                let entry = format!("[{}] {} = {} {}", cat, key, val, unit);
+                let mut content = self.right_panel.spec_content.clone();
+                if !content.is_empty() { content.push('\n'); }
+                content.push_str(&entry);
+                self.right_panel.set_spec(&content);
+            }
+            "mark_spec_complete" => {
+                self.conversation.add("system", "Spec complete. Type 'advance' to move to Decompose phase.");
+                self.session.add_message(self.phase, "system", "Spec complete.");
+            }
+            "propose_component_tree" => {
+                if let Some(components) = tool.input.get("components").and_then(|v| v.as_array()) {
+                    let mut lines = Vec::new();
+                    for c in components {
+                        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                        let cname = c.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+                        let op = c.get("assembly_op").and_then(|v| v.as_str()).unwrap_or("union");
+                        lines.push(format!("  {} -- {} [{}]", id, cname, op));
+                    }
+                    self.conversation.add("system",
+                        &format!("Component tree proposed:\n{}\nType 'approve' to accept, or describe changes.",
+                            lines.join("\n")));
+                }
+            }
+            "submit_cadquery_code" | "submit_assembly_code" | "submit_code_patch" => {
+                // Build happened in MCP server -- detect new files and refresh viewer
+                if let Some(ref dir) = self.session.active_dir {
+                    let working_stl = dir.join("working.stl");
+                    if working_stl.exists() {
+                        let _ = self.viewer.update_working_stl(&working_stl);
+                        if !self.viewer.is_running() {
+                            let _ = self.viewer.show();
+                        }
+                    }
+                }
+                self.right_panel.set_model("Build complete -- check 3D viewer");
+            }
+            "request_approval" => {
+                if let Some(summary) = tool.input.get("summary").and_then(|v| v.as_str()) {
+                    self.conversation.add("system",
+                        &format!("Review model in viewer. {}\nType 'approve' or describe changes.", summary));
+                }
+            }
+            "update_parameter" => {
+                let pname = tool.input.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let new_val = tool.input.get("new_value").and_then(|v| v.as_str()).unwrap_or("");
+                let mut content = self.right_panel.spec_content.clone();
+                content.push_str(&format!("\nUpdated: {} = {}", pname, new_val));
+                self.right_panel.set_spec(&content);
+            }
+            _ => {} // Unknown tool -- ignore
+        }
+    }
+
     /// Kill any running Claude subprocess on app exit.
     fn cleanup(&self) {
         self.claude.cancel();
@@ -1863,7 +1971,11 @@ impl<'a> App<'a> {
     }
 
     fn send_assembly_feedback(&mut self, text: &str) {
-        self.claude.send_phase_prompt("assembly", text, &[], None);
+        let session_dir = self.session.active_dir.clone();
+        let mcp_config = claude_bridge::generate_mcp_config(
+            "assembly", session_dir.as_deref()
+        ).ok();
+        self.claude.send_phase_prompt("assembly", text, &[], None, mcp_config);
     }
 
     fn handle_refinement_input(&mut self, text: &str) {
@@ -1912,7 +2024,11 @@ impl<'a> App<'a> {
     }
 
     fn send_refinement_feedback(&mut self, text: &str) {
-        self.claude.send_phase_prompt("refinement", text, &[], None);
+        let session_dir = self.session.active_dir.clone();
+        let mcp_config = claude_bridge::generate_mcp_config(
+            "refinement", session_dir.as_deref()
+        ).ok();
+        self.claude.send_phase_prompt("refinement", text, &[], None, mcp_config);
     }
 
     fn handle_export(&mut self) {
@@ -1952,7 +2068,11 @@ impl<'a> App<'a> {
     }
 
     fn send_component_prompt(&mut self, text: &str, images: Vec<PathBuf>) {
-        self.claude.send_phase_prompt("component", text, &images, None);
+        let session_dir = self.session.active_dir.clone();
+        let mcp_config = claude_bridge::generate_mcp_config(
+            "component", session_dir.as_deref()
+        ).ok();
+        self.claude.send_phase_prompt("component", text, &images, None, mcp_config);
     }
 
     fn send_component_feedback(&mut self, text: &str, images: Vec<PathBuf>) {
@@ -1962,7 +2082,11 @@ impl<'a> App<'a> {
         } else {
             "component"
         };
-        self.claude.send_phase_prompt(phase_name, text, &images, None);
+        let session_dir = self.session.active_dir.clone();
+        let mcp_config = claude_bridge::generate_mcp_config(
+            phase_name, session_dir.as_deref()
+        ).ok();
+        self.claude.send_phase_prompt(phase_name, text, &images, None, mcp_config);
     }
 
     fn handle_component_build_result(&mut self, build_result: python::BuildResult, _code: String) {
@@ -2266,6 +2390,32 @@ fn run_event_loop(
             app.claude.streaming_text.clear();
             app.handle_bg_result(result);
             app.dirty = true;
+        }
+
+        // Drain MCP tool calls
+        let tool_calls = app.claude.drain_tool_calls();
+        for tc in tool_calls {
+            app.handle_tool_call(tc);
+            app.dirty = true;
+        }
+
+        // Poll .building file for BusyState transitions
+        if app.claude.busy == BusyState::Thinking {
+            if let Some(ref dir) = app.session.active_dir {
+                let building = dir.join(".building");
+                if building.exists() {
+                    app.claude.busy = BusyState::Building;
+                    app.dirty = true;
+                }
+            }
+        } else if app.claude.busy == BusyState::Building {
+            if let Some(ref dir) = app.session.active_dir {
+                let building = dir.join(".building");
+                if !building.exists() {
+                    app.claude.busy = BusyState::Thinking;
+                    app.dirty = true;
+                }
+            }
         }
 
         // Render only when dirty
