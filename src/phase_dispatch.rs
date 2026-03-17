@@ -83,7 +83,8 @@ impl<'a> App<'a> {
         let mcp_config = claude_bridge::generate_mcp_config(
             "decompose", session_dir.as_deref()
         ).ok();
-        self.claude.send_phase_prompt("decompose", text, &[], None, mcp_config);
+        let ctx = self.build_phase_context();
+        self.claude.send_phase_prompt("decompose", text, &[], ctx.as_deref(), mcp_config);
     }
 
     pub(crate) fn handle_decompose_response(&mut self, response: &str) {
@@ -181,7 +182,8 @@ impl<'a> App<'a> {
         let mcp_config = claude_bridge::generate_mcp_config(
             "assembly", session_dir.as_deref()
         ).ok();
-        self.claude.send_phase_prompt("assembly", text, &[], None, mcp_config);
+        let ctx = self.build_phase_context();
+        self.claude.send_phase_prompt("assembly", text, &[], ctx.as_deref(), mcp_config);
     }
 
     // -- Refinement phase --
@@ -236,7 +238,8 @@ impl<'a> App<'a> {
         let mcp_config = claude_bridge::generate_mcp_config(
             "refinement", session_dir.as_deref()
         ).ok();
-        self.claude.send_phase_prompt("refinement", text, &[], None, mcp_config);
+        let ctx = self.build_phase_context();
+        self.claude.send_phase_prompt("refinement", text, &[], ctx.as_deref(), mcp_config);
     }
 
     pub(crate) fn handle_export(&mut self) {
@@ -280,7 +283,8 @@ impl<'a> App<'a> {
         let mcp_config = claude_bridge::generate_mcp_config(
             "component", session_dir.as_deref()
         ).ok();
-        self.claude.send_phase_prompt("component", text, &images, None, mcp_config);
+        let ctx = self.build_phase_context();
+        self.claude.send_phase_prompt("component", text, &images, ctx.as_deref(), mcp_config);
     }
 
     pub(crate) fn send_component_feedback(&mut self, text: &str, images: Vec<PathBuf>) {
@@ -294,7 +298,8 @@ impl<'a> App<'a> {
         let mcp_config = claude_bridge::generate_mcp_config(
             phase_name, session_dir.as_deref()
         ).ok();
-        self.claude.send_phase_prompt(phase_name, text, &images, None, mcp_config);
+        let ctx = self.build_phase_context();
+        self.claude.send_phase_prompt(phase_name, text, &images, ctx.as_deref(), mcp_config);
     }
 
     pub(crate) fn handle_component_build_result(&mut self, build_result: python::BuildResult, _code: String) {

@@ -902,6 +902,38 @@ impl<'a> App<'a> {
         if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
     }
 
+    /// Build full context for non-Spec phases: spec data + reference context.
+    /// This ensures Claude knows what was specified when working in later phases.
+    fn build_phase_context(&self) -> Option<String> {
+        let mut parts = Vec::new();
+
+        // Include spec data from the right panel
+        let spec = self.right_panel.spec_content.clone();
+        if !spec.is_empty() {
+            parts.push(format!("## Design Specification\n{spec}"));
+        }
+
+        // Include previous conversation for context
+        let spec_conversation = self.session.conversations(Phase::Spec);
+        if !spec_conversation.is_empty() {
+            let summary: Vec<String> = spec_conversation.iter()
+                .filter(|e| e.role == "user" || e.role == "assistant")
+                .take(20) // Limit to last 20 messages
+                .map(|e| format!("{}: {}", e.role, e.content))
+                .collect();
+            if !summary.is_empty() {
+                parts.push(format!("## Spec Conversation Summary\n{}", summary.join("\n")));
+            }
+        }
+
+        // Include reference context
+        if let Some(ref_ctx) = self.build_ref_context() {
+            parts.push(ref_ctx);
+        }
+
+        if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
+    }
+
     fn handle_bg_result(&mut self, result: BackgroundResult) {
         match result {
             BackgroundResult::ClaudeResponse { result, session_id } => {
