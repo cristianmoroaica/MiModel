@@ -34,6 +34,7 @@ use crate::tui::model_panel::ModelPanel;
 use crate::tui::spec_panel::SpecPanel;
 use crate::tui::component_tree::ComponentTreePanel;
 use crate::tui::component_list::ComponentListPanel;
+use crate::tui::right_panel::RightPanel;
 use crate::viewer::Viewer;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -64,6 +65,7 @@ struct App<'a> {
     spec_panel: SpecPanel,
     component_tree_panel: ComponentTreePanel,
     component_list: ComponentListPanel,
+    right_panel: RightPanel,
 
     // Backend
     session: SessionManager,
@@ -145,6 +147,7 @@ impl<'a> App<'a> {
             spec_panel: SpecPanel::new(),
             component_tree_panel: ComponentTreePanel::new(),
             component_list: ComponentListPanel::new(),
+            right_panel: RightPanel::new(),
             session,
             claude_system_prompt,
             claude: claude_bridge::ClaudeBridge::new(config.claude.model),
@@ -249,20 +252,9 @@ impl<'a> App<'a> {
         // Write the clamped scroll back so scroll_up() works from a real position
         self.conversation.scroll_offset = self.conversation.scroll_offset.min(max_scroll);
 
-        // Render right panel (phase-aware)
+        // Render right panel (unified tabbed panel)
         if let Some(right_area) = panes.right_panel {
-            let right_focused = self.focus == Focus::RightPanel;
-            match self.phase {
-                Phase::Spec => {
-                    self.spec_panel.render(frame, right_area, right_focused);
-                }
-                Phase::Decompose => {
-                    self.component_tree_panel.render(frame, right_area, right_focused);
-                }
-                Phase::Component | Phase::Assembly | Phase::Refinement => {
-                    self.model_panel.render(frame, right_area, right_focused);
-                }
-            }
+            self.right_panel.render(frame, right_area, self.focus == Focus::RightPanel);
         }
 
         // Render input bar with status indicators
@@ -366,6 +358,10 @@ impl<'a> App<'a> {
                 Span::raw(" Quit "),
             ],
             Focus::RightPanel => vec![
+                Span::styled(" h/l ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
+                Span::raw(" Tabs "),
+                Span::styled(" j/k ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
+                Span::raw(" Scroll "),
                 Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Panes "),
                 Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
@@ -459,6 +455,13 @@ impl<'a> App<'a> {
                         self.model_panel.clear();
                         if let Some(meta) = self.session.current_metadata.clone() {
                             self.model_panel.update(&meta, None, 0);
+                            let model_summary = format!(
+                                "{:.1} x {:.1} x {:.1} mm\nIterations: 0\nEngine: {}\nWatertight: {}",
+                                meta.dimensions.x, meta.dimensions.y, meta.dimensions.z,
+                                meta.engine.as_str(),
+                                if meta.watertight { "yes" } else { "no" }
+                            );
+                            self.right_panel.set_model(&model_summary);
                         }
                     } else {
                         self.conversation.add("system", "Nothing to undo.");
@@ -624,7 +627,7 @@ impl<'a> App<'a> {
             Focus::Input => self.handle_input_key(key),
             Focus::ProjectTree => self.handle_tree_key(key),
             Focus::Conversation => self.handle_conversation_key(key),
-            Focus::RightPanel => {}
+            Focus::RightPanel => self.handle_right_panel_key(key),
         }
     }
 
@@ -739,6 +742,17 @@ impl<'a> App<'a> {
             Down | Char('j') => self.conversation.scroll_down(1),
             Char('u') => self.conversation.scroll_up(10),
             Char('d') => self.conversation.scroll_down(10),
+            _ => {}
+        }
+    }
+
+    fn handle_right_panel_key(&mut self, key: crossterm::event::KeyEvent) {
+        use KeyCode::*;
+        match key.code {
+            Left | Char('h') => self.right_panel.prev_tab(),
+            Right | Char('l') => self.right_panel.next_tab(),
+            Up | Char('k') => self.right_panel.scroll_up(1),
+            Down | Char('j') => self.right_panel.scroll_down(1),
             _ => {}
         }
     }
@@ -1068,6 +1082,7 @@ impl<'a> App<'a> {
                     }
                     let summary = reference::summarize_for_prompt(&[&comp]);
                     self.conversation.add("system", &format!("Loaded reference:\n{summary}"));
+                    self.refresh_refs_panel();
                     return;
                 }
                 Err(e) if e.contains("Multiple matches") => {
@@ -1140,6 +1155,7 @@ impl<'a> App<'a> {
                         }
                         self.conversation.add("system",
                             &format!("Saved reference '{}' as {saved_slug}.toml", comp.identity.name));
+                        self.refresh_refs_panel();
                     }
                     Err(e) => self.conversation.add("system", &format!("Failed to save: {e}")),
                 }
@@ -1256,6 +1272,7 @@ impl<'a> App<'a> {
             }
             spec_content.push_str(clean_response);
             self.spec_panel.set_content(&spec_content);
+            self.right_panel.set_spec(&spec_content);
         }
     }
 
@@ -1307,6 +1324,7 @@ impl<'a> App<'a> {
 
                 // Store the raw TOML for later merging into spec
                 self.spec_panel.set_content(toml_str);
+                self.right_panel.set_spec(toml_str);
             }
             Err(e) => {
                 self.conversation.add("system", &format!("TOML parse error: {e}"));
@@ -1438,7 +1456,19 @@ impl<'a> App<'a> {
 
                 // Update model panel with STL path for braille preview
                 let stl_path = self.session.latest_stl_path();
-                self.model_panel.update(meta, stl_path.as_deref(), self.session.iteration());
+                let iteration = self.session.iteration();
+                self.model_panel.update(meta, stl_path.as_deref(), iteration);
+                let model_summary = format!(
+                    "{:.1} x {:.1} x {:.1} mm\nIterations: {}\nEngine: {}\nWatertight: {}{}",
+                    meta.dimensions.x, meta.dimensions.y, meta.dimensions.z,
+                    iteration,
+                    meta.engine.as_str(),
+                    if meta.watertight { "yes" } else { "no" },
+                    if meta.features.is_empty() { String::new() } else {
+                        format!("\n\nFeatures:\n{}", meta.features.iter().map(|f| format!("  - {f}")).collect::<Vec<_>>().join("\n"))
+                    }
+                );
+                self.right_panel.set_model(&model_summary);
 
                 // Update working.stl so f3d auto-reloads
                 if let Some(ref src) = stl_path {
@@ -1647,6 +1677,28 @@ impl<'a> App<'a> {
         self.project_tree.refresh(&projects);
     }
 
+    /// Rebuild the Refs tab content from the current active_refs list.
+    fn refresh_refs_panel(&mut self) {
+        let library = reference::load_library().unwrap_or_default();
+        if self.active_refs.is_empty() {
+            self.right_panel.set_refs("No references loaded. Use /ref <name> to load.");
+            return;
+        }
+        let mut lines = Vec::new();
+        lines.push(format!("Active references ({}):", self.active_refs.len()));
+        for slug in &self.active_refs {
+            if let Some((comp, _)) = library.iter().find(|(_, s)| s == slug) {
+                lines.push(format!(
+                    "  {} — {} [{}]",
+                    slug, comp.identity.name, comp.identity.category
+                ));
+            } else {
+                lines.push(format!("  {slug} (not in library)"));
+            }
+        }
+        self.right_panel.set_refs(&lines.join("\n"));
+    }
+
     /// Kill any running Claude subprocess on app exit.
     fn cleanup(&self) {
         self.claude.cancel();
@@ -1806,7 +1858,19 @@ impl<'a> App<'a> {
 
                 // Update model panel
                 let stl_path = self.session.latest_stl_path();
-                self.model_panel.update(meta, stl_path.as_deref(), self.session.iteration());
+                let iteration = self.session.iteration();
+                self.model_panel.update(meta, stl_path.as_deref(), iteration);
+                let model_summary = format!(
+                    "{:.1} x {:.1} x {:.1} mm\nIterations: {}\nEngine: {}\nWatertight: {}{}",
+                    meta.dimensions.x, meta.dimensions.y, meta.dimensions.z,
+                    iteration,
+                    meta.engine.as_str(),
+                    if meta.watertight { "yes" } else { "no" },
+                    if meta.features.is_empty() { String::new() } else {
+                        format!("\n\nFeatures:\n{}", meta.features.iter().map(|f| format!("  - {f}")).collect::<Vec<_>>().join("\n"))
+                    }
+                );
+                self.right_panel.set_model(&model_summary);
 
                 // Update viewer
                 if let Some(ref src) = stl_path {
@@ -1871,7 +1935,19 @@ impl<'a> App<'a> {
             // Update model panel and viewer
             if let Some(ref meta) = self.session.current_metadata {
                 let stl_path = self.session.latest_stl_path();
-                self.model_panel.update(meta, stl_path.as_deref(), self.session.iteration());
+                let iteration = self.session.iteration();
+                self.model_panel.update(meta, stl_path.as_deref(), iteration);
+                let model_summary = format!(
+                    "{:.1} x {:.1} x {:.1} mm\nIterations: {}\nEngine: {}\nWatertight: {}{}",
+                    meta.dimensions.x, meta.dimensions.y, meta.dimensions.z,
+                    iteration,
+                    meta.engine.as_str(),
+                    if meta.watertight { "yes" } else { "no" },
+                    if meta.features.is_empty() { String::new() } else {
+                        format!("\n\nFeatures:\n{}", meta.features.iter().map(|f| format!("  - {f}")).collect::<Vec<_>>().join("\n"))
+                    }
+                );
+                self.right_panel.set_model(&model_summary);
                 if let Some(ref src) = stl_path {
                     let _ = self.viewer.update_working_stl(src);
                 }
@@ -1964,6 +2040,7 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         spec_panel: SpecPanel::new(),
         component_tree_panel: ComponentTreePanel::new(),
         component_list: ComponentListPanel::new(),
+        right_panel: RightPanel::new(),
         session: SessionManager::new(60, python_path.clone()),
         claude_system_prompt: String::new(),
         claude: claude_bridge::ClaudeBridge::new(config.claude.model.clone()),
@@ -2111,6 +2188,8 @@ fn run_event_loop(
                             let pos = ratatui::prelude::Position::new(mouse.column, mouse.row);
                             if app.panel_rects.conversation.contains(pos) {
                                 app.conversation.scroll_up(3);
+                            } else if app.panel_rects.right_panel.contains(pos) {
+                                app.right_panel.scroll_up(3);
                             }
                             app.dirty = true;
                         }
@@ -2118,6 +2197,8 @@ fn run_event_loop(
                             let pos = ratatui::prelude::Position::new(mouse.column, mouse.row);
                             if app.panel_rects.conversation.contains(pos) {
                                 app.conversation.scroll_down(3);
+                            } else if app.panel_rects.right_panel.contains(pos) {
+                                app.right_panel.scroll_down(3);
                             }
                             app.dirty = true;
                         }

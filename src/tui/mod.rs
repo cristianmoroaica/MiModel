@@ -8,6 +8,7 @@ pub mod component_tree;
 pub mod component_list;
 pub mod param_editor;
 pub mod status_bar;
+pub mod right_panel;
 
 /// Focus state — which pane has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq)]
