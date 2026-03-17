@@ -3,6 +3,15 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use crate::phase::Phase;
 
+/// Cached Rect positions for mouse hit-testing.
+#[derive(Default, Clone)]
+pub struct PanelRects {
+    pub project_tree: ratatui::prelude::Rect,
+    pub conversation: ratatui::prelude::Rect,
+    pub right_panel: ratatui::prelude::Rect,
+    pub input: ratatui::prelude::Rect,
+}
+
 pub struct PaneAreas {
     pub left_panel: Option<Rect>,   // was project_tree
     pub conversation: Rect,

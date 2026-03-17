@@ -25,7 +25,7 @@ use crate::phase::Phase;
 use crate::storage::Project;
 use crate::claude_bridge::BusyState;
 use crate::tui::{BackgroundResult, Focus};
-use crate::tui::layout::{LayoutConfig, compute_layout};
+use crate::tui::layout::{LayoutConfig, PanelRects, compute_layout};
 use crate::tui::input_bar::InputBar;
 use crate::tui::conversation::ConversationPane;
 use crate::tui::project_tree::ProjectTreePane;
@@ -81,7 +81,10 @@ struct App<'a> {
 
     // App state
     should_quit: bool,
+    dirty: bool,
     spinner_frame: usize,
+    /// Cached panel Rects for mouse hit-testing
+    panel_rects: PanelRects,
     /// Timestamp of last Ctrl+C press (for double-tap quit)
     last_ctrl_c: Option<std::time::Instant>,
 
@@ -157,7 +160,9 @@ impl<'a> App<'a> {
             active_session_name: None,
             active_session_dir: None,
             should_quit: false,
+            dirty: true,
             spinner_frame: 0,
+            panel_rects: PanelRects::default(),
             last_ctrl_c: None,
             new_session_pending: false,
             new_project_pending: false,
@@ -186,6 +191,12 @@ impl<'a> App<'a> {
         // Keep layout phase in sync with app phase
         self.layout_config.phase = self.phase;
         let panes = compute_layout(area, &self.layout_config);
+
+        // Cache panel Rects for mouse hit-testing
+        self.panel_rects.project_tree = panes.left_panel.unwrap_or_default();
+        self.panel_rects.conversation = panes.conversation;
+        self.panel_rects.right_panel = panes.right_panel.unwrap_or_default();
+        self.panel_rects.input = panes.input_bar;
 
         // Render left panel (phase-aware)
         if let Some(left_area) = panes.left_panel {
@@ -232,15 +243,16 @@ impl<'a> App<'a> {
 
         // Render right panel (phase-aware)
         if let Some(right_area) = panes.right_panel {
+            let right_focused = self.focus == Focus::RightPanel;
             match self.phase {
                 Phase::Spec => {
-                    self.spec_panel.render(frame, right_area, false);
+                    self.spec_panel.render(frame, right_area, right_focused);
                 }
                 Phase::Decompose => {
-                    self.component_tree_panel.render(frame, right_area, false);
+                    self.component_tree_panel.render(frame, right_area, right_focused);
                 }
                 Phase::Component | Phase::Assembly | Phase::Refinement => {
-                    self.model_panel.render(frame, right_area, false);
+                    self.model_panel.render(frame, right_area, right_focused);
                 }
             }
         }
@@ -340,6 +352,12 @@ impl<'a> App<'a> {
                 Span::raw(" Scroll "),
                 Span::styled(" u/d ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Page "),
+                Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
+                Span::raw(" Panes "),
+                Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
+                Span::raw(" Quit "),
+            ],
+            Focus::RightPanel => vec![
                 Span::styled(" Tab ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
                 Span::raw(" Panes "),
                 Span::styled(" Ctrl+C ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
@@ -580,9 +598,10 @@ impl<'a> App<'a> {
             }
             (Tab, _) => {
                 self.focus = match self.focus {
-                    Focus::Input => Focus::ProjectTree,
-                    Focus::ProjectTree => Focus::Conversation,
-                    Focus::Conversation => Focus::Input,
+                    Focus::Input => Focus::Conversation,
+                    Focus::Conversation => Focus::RightPanel,
+                    Focus::RightPanel => Focus::ProjectTree,
+                    Focus::ProjectTree => Focus::Input,
                 };
                 return;
             }
@@ -598,6 +617,7 @@ impl<'a> App<'a> {
             Focus::Input => self.handle_input_key(key),
             Focus::ProjectTree => self.handle_tree_key(key),
             Focus::Conversation => self.handle_conversation_key(key),
+            Focus::RightPanel => {}
         }
     }
 
@@ -2067,7 +2087,9 @@ fn make_fallback_app<'a>(config: Config, warn: &str) -> App<'a> {
         active_session_name: None,
         active_session_dir: None,
         should_quit: false,
+        dirty: true,
         spinner_frame: 0,
+        panel_rects: PanelRects::default(),
         last_ctrl_c: None,
         new_session_pending: false,
         new_project_pending: false,
@@ -2118,8 +2140,12 @@ fn main() {
     // Initialize ratatui terminal
     let mut terminal = ratatui::init();
 
-    // Enable bracketed paste for drag-and-drop file detection
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
+    // Enable bracketed paste for drag-and-drop file detection and mouse capture
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::EnableBracketedPaste,
+        crossterm::event::EnableMouseCapture,
+    );
 
     // Run event loop
     let result = run_event_loop(&mut terminal, &mut app);
@@ -2127,8 +2153,12 @@ fn main() {
     // Kill any running Claude subprocess before exiting
     app.cleanup();
 
-    // Disable bracketed paste before restoring terminal
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+    // Disable bracketed paste and mouse capture before restoring terminal
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::DisableBracketedPaste,
+        crossterm::event::DisableMouseCapture,
+    );
 
     // Restore terminal
     ratatui::restore();
@@ -2143,18 +2173,26 @@ fn run_event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
 ) -> std::io::Result<()> {
-    loop {
-        terminal.draw(|f| app.render(f))?;
+    let mut tick_count: u64 = 0;
 
+    loop {
         // Drain streaming text chunks from Claude
         if app.claude.drain_streaming() {
             app.conversation.scroll_to_bottom();
+            app.dirty = true;
         }
 
         // Check background channel (final result)
         if let Some(result) = app.claude.try_recv_result() {
             app.claude.streaming_text.clear();
             app.handle_bg_result(result);
+            app.dirty = true;
+        }
+
+        // Render only when dirty
+        if app.dirty {
+            terminal.draw(|f| app.render(f))?;
+            app.dirty = false;
         }
 
         // Poll for events with 50ms timeout
@@ -2162,18 +2200,56 @@ fn run_event_loop(
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     app.handle_key(key);
+                    app.dirty = true;
                 }
                 Event::Paste(text) => {
                     app.handle_paste(text);
+                    app.dirty = true;
+                }
+                Event::Mouse(mouse) => {
+                    use crossterm::event::{MouseEventKind, MouseButton};
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let pos = ratatui::prelude::Position::new(mouse.column, mouse.row);
+                            if app.panel_rects.project_tree.contains(pos) {
+                                app.focus = Focus::ProjectTree;
+                            } else if app.panel_rects.conversation.contains(pos) {
+                                app.focus = Focus::Conversation;
+                            } else if app.panel_rects.right_panel.contains(pos) {
+                                app.focus = Focus::RightPanel;
+                            } else if app.panel_rects.input.contains(pos) {
+                                app.focus = Focus::Input;
+                            }
+                            app.dirty = true;
+                        }
+                        MouseEventKind::ScrollUp => {
+                            let pos = ratatui::prelude::Position::new(mouse.column, mouse.row);
+                            if app.panel_rects.conversation.contains(pos) {
+                                app.conversation.scroll_up(3);
+                            }
+                            app.dirty = true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            let pos = ratatui::prelude::Position::new(mouse.column, mouse.row);
+                            if app.panel_rects.conversation.contains(pos) {
+                                app.conversation.scroll_down(3);
+                            }
+                            app.dirty = true;
+                        }
+                        _ => {}
+                    }
                 }
                 _ => {}
             }
         }
 
-        // Advance spinner
-        if app.claude.busy != BusyState::Idle {
+        // Advance spinner at ~10fps (every 5th loop at 50ms = 250ms period)
+        if app.claude.busy != BusyState::Idle && tick_count % 5 == 0 {
             app.spinner_frame = app.spinner_frame.wrapping_add(1);
+            app.dirty = true;
         }
+
+        tick_count = tick_count.wrapping_add(1);
 
         if app.should_quit {
             break;

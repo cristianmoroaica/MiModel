@@ -15,6 +15,7 @@ pub enum Focus {
     Input,
     ProjectTree,
     Conversation,
+    RightPanel,
 }
 
 /// Results from background threads.
