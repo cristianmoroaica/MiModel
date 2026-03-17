@@ -37,14 +37,10 @@ impl<'a> App<'a> {
     }
 
     pub(crate) fn handle_spec_response(&mut self, response: &str) {
-        // Rail: Spec phase produces ONLY specification text, never code.
-        // Strip any code blocks that Claude may have included despite prompt instructions.
-        let parsed = parser::parse_response(response);
-        if parsed.code.is_some() {
-            self.conversation.add("system",
-                "Code block ignored — Spec phase collects requirements only. Move to Component phase to build.");
-        }
-        let clean_response = if parsed.text.is_empty() { response } else { &parsed.text };
+        // With MCP tools, code-block stripping and SPEC_COMPLETE detection are no longer
+        // needed — structure is enforced by tool availability. This handler now just:
+        // 1. Runs reference detection on Claude's freeform text
+        // 2. Appends to the spec panel for visibility
 
         // Auto-detect external component references
         let known_slugs: Vec<String> = reference::load_library()
@@ -52,7 +48,7 @@ impl<'a> App<'a> {
             .iter()
             .map(|(_, slug)| slug.clone())
             .collect();
-        let detected = reference_detect::detect_references(clean_response, &known_slugs);
+        let detected = reference_detect::detect_references(response, &known_slugs);
         for det in &detected {
             if det.in_library {
                 self.conversation.add("system",
@@ -65,28 +61,14 @@ impl<'a> App<'a> {
             }
         }
 
-        // Update spec panel with the running conversation
+        // Append Claude's text to the spec panel for visibility
         let mut spec_content = self.spec_panel.content().to_string();
-
-        // Check for SPEC_COMPLETE signal
-        if clean_response.contains("SPEC_COMPLETE") {
-            self.conversation.add("system", "Specification complete! Building spec.toml...");
-            self.conversation.add("system", "Transitioning to Decompose phase. You can review the spec in the right panel.");
-
-            // Transition to Decompose
-            self.phase = Phase::Decompose;
-            self.layout_config.phase = Phase::Decompose;
-            self.claude.session_id = None; // Fresh session for Decompose
-            self.session.save(self.phase);
-        } else {
-            // Append Claude's response to the spec panel for visibility
-            if !spec_content.is_empty() {
-                spec_content.push_str("\n\n");
-            }
-            spec_content.push_str(clean_response);
-            self.spec_panel.set_content(&spec_content);
-            self.right_panel.set_spec(&spec_content);
+        if !spec_content.is_empty() {
+            spec_content.push_str("\n\n");
         }
+        spec_content.push_str(response);
+        self.spec_panel.set_content(&spec_content);
+        self.right_panel.set_spec(&spec_content);
     }
 
     #[allow(dead_code)]
@@ -105,24 +87,18 @@ impl<'a> App<'a> {
     }
 
     pub(crate) fn handle_decompose_response(&mut self, response: &str) {
-        // Rail: Decompose phase accepts ONLY TOML component trees, never code.
-        let parsed = parser::parse_response(response);
-        if parsed.code.is_some() {
-            self.conversation.add("system",
-                "Code block ignored — Decompose phase defines component structure only.");
-        }
+        // With MCP tools, code-block stripping is no longer needed — the propose_component_tree
+        // tool handles structured component proposals. This handler processes any freeform text
+        // and also handles legacy TOML responses for backward compat during transition.
 
         match parser::parse_toml_response(response) {
             Ok(toml_str) => {
-                // Parse the TOML and display components in the tree panel
                 self.parse_and_display_components(&toml_str);
-
                 self.conversation.add("system",
                     "Component tree proposed. Type 'approve' to accept, or describe changes.");
             }
             Err(_) => {
-                // No TOML found — treat as conversation (Claude asking clarifying questions)
-                // This is fine, not every decompose response needs to contain TOML.
+                // No TOML — just conversation text, which is fine.
             }
         }
     }

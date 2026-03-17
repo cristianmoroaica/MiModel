@@ -490,6 +490,27 @@ impl<'a> App<'a> {
             return;
         }
 
+        // Handle /attach command — explicit file attachment (works in tmux where drag-drop doesn't)
+        if text.starts_with("/attach") {
+            let paths_str = text.strip_prefix("/attach").unwrap_or("").trim();
+            if paths_str.is_empty() {
+                self.conversation.add("system", "Usage: /attach <path> [path2 ...]\nPaste or type file paths to attach images/PDFs.");
+                return;
+            }
+            let (_, files) = image::extract_attachment_paths(paths_str);
+            if files.is_empty() {
+                self.conversation.add("system", "No valid image/PDF files found in the provided paths.");
+            } else {
+                for path in &files {
+                    let kind = if image::is_pdf(path) { "PDF" } else { "image" };
+                    let size_kb = std::fs::metadata(path).map(|m| m.len() / 1024).unwrap_or(0);
+                    self.conversation.add("system", &format!("Attached {kind} ({size_kb}KB): {}", path.display()));
+                }
+                self.pending_images.extend(files);
+            }
+            return;
+        }
+
         // Auto-create session name from first prompt if none active
         if self.session.active_name.is_none() {
             let session_name: String = text.chars()
