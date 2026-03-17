@@ -10,6 +10,7 @@ mod preview;
 mod prompt_builder;
 mod python;
 mod reference;
+mod reference_detect;
 mod spec;
 mod stl;
 mod storage;
