@@ -944,7 +944,18 @@ impl<'a> App<'a> {
         if text.starts_with("/ref") {
             let (_clean, mut images) = image::extract_attachment_paths(&text);
             images.extend(self.pending_images.drain(..));
-            self.handle_ref_command(&text, images);
+
+            // Check for multiple /ref commands (e.g. "/ref nema23, /ref Arduino Nano, /ref DM556-S")
+            let parts: Vec<&str> = text.split("/ref")
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().trim_matches(',').trim())
+                .collect();
+
+            if parts.len() > 1 {
+                self.handle_multi_ref(parts, images);
+            } else {
+                self.handle_ref_command(&text, images);
+            }
             return;
         }
 
@@ -1130,39 +1141,140 @@ impl<'a> App<'a> {
         );
     }
 
-    fn save_pending_reference(&mut self, pending: PendingReference) {
-        // Try to extract TOML from the response (look for ```toml block)
-        let toml_str = if let Ok(extracted) = parser::parse_toml_response(&pending.raw_response) {
-            extracted
-        } else {
-            pending.raw_response.clone()
-        };
+    fn handle_multi_ref(&mut self, names: Vec<&str>, images: Vec<PathBuf>) {
+        let mut loaded = Vec::new();
+        let mut to_research = Vec::new();
 
-        let now = chrono::Utc::now().to_rfc3339();
-
-        match toml::from_str::<reference::ReferenceComponent>(&toml_str) {
-            Ok(mut comp) => {
-                if comp.identity.created.is_empty() {
-                    comp.identity.created = now.clone();
-                }
-                if comp.identity.updated.is_empty() {
-                    comp.identity.updated = now;
-                }
-                match reference::save(&comp) {
-                    Ok(saved_slug) => {
-                        if !self.active_refs.contains(&saved_slug) {
-                            self.active_refs.push(saved_slug.clone());
-                        }
-                        self.conversation.add("system",
-                            &format!("Saved reference '{}' as {saved_slug}.toml", comp.identity.name));
-                        self.refresh_refs_panel();
+        for name in &names {
+            match reference::load_one(name) {
+                Ok((comp, slug)) => {
+                    if !self.active_refs.contains(&slug) {
+                        self.active_refs.push(slug.clone());
                     }
-                    Err(e) => self.conversation.add("system", &format!("Failed to save: {e}")),
+                    loaded.push(comp.identity.name.clone());
+                }
+                Err(_) => {
+                    to_research.push(name.to_string());
                 }
             }
-            Err(e) => {
+        }
+
+        if !loaded.is_empty() {
+            self.conversation.add("system",
+                &format!("Loaded {} references: {}", loaded.len(), loaded.join(", ")));
+            self.refresh_refs_panel();
+        }
+
+        if to_research.is_empty() {
+            return;
+        }
+
+        // Research all unknown components in a single Claude call
+        self.conversation.add("system",
+            &format!("Researching {} components: {}...", to_research.len(), to_research.join(", ")));
+
+        let research_prompt = format!(
+            "Research these components and return a TOML block for EACH one:\n- {}\n\n\
+             For each component, output a separate ```toml fenced block with [identity], [dimensions], [constraints], [sources] sections.\n\
+             Use the exact format: name, manufacturer, part_number, category, created=\"\", updated=\"\" in [identity].\n\
+             All dimensions in mm. Constraints with unit suffixes (_g, _a, _nm, _c, _kn).\n\
+             Separate each component's TOML block clearly.",
+            to_research.join("\n- ")
+        );
+
+        // Store the names for batch save handling (comma-separated signals batch mode)
+        let result_name = to_research.join(",");
+
+        self.claude.send_raw_prompt(
+            "You are a technical reference researcher. Search for component datasheets and extract precise mechanical specifications.",
+            &research_prompt,
+            &images,
+            &result_name,
+        );
+    }
+
+    fn save_pending_reference(&mut self, pending: PendingReference) {
+        let is_batch = pending.name.contains(',');
+
+        if is_batch {
+            // Extract multiple TOML blocks from the response
+            let mut saved = Vec::new();
+            let mut failed = Vec::new();
+            let now = chrono::Utc::now().to_rfc3339();
+
+            for block in pending.raw_response.split("```toml") {
+                if let Some(end) = block.find("```") {
+                    let toml_str = block[..end].trim();
+                    if toml_str.is_empty() {
+                        continue;
+                    }
+                    match toml::from_str::<reference::ReferenceComponent>(toml_str) {
+                        Ok(mut comp) => {
+                            if comp.identity.created.is_empty() {
+                                comp.identity.created = now.clone();
+                            }
+                            if comp.identity.updated.is_empty() {
+                                comp.identity.updated = now.clone();
+                            }
+                            let name = comp.identity.name.clone();
+                            match reference::save(&comp) {
+                                Ok(slug) => {
+                                    if !self.active_refs.contains(&slug) {
+                                        self.active_refs.push(slug);
+                                    }
+                                    saved.push(name);
+                                }
+                                Err(e) => failed.push(format!("{}: {}", name, e)),
+                            }
+                        }
+                        Err(e) => failed.push(format!("parse error: {}", e)),
+                    }
+                }
+            }
+
+            if !saved.is_empty() {
                 self.conversation.add("system",
-                    &format!("Failed to parse reference TOML: {e}\nTry `/ref refresh {}` to retry.", pending.name));
+                    &format!("Saved {} references: {}", saved.len(), saved.join(", ")));
+                self.refresh_refs_panel();
+            }
+            if !failed.is_empty() {
+                self.conversation.add("system",
+                    &format!("Failed: {}", failed.join("; ")));
+            }
+        } else {
+            // Single reference — existing logic
+            let toml_str = if let Ok(extracted) = parser::parse_toml_response(&pending.raw_response) {
+                extracted
+            } else {
+                pending.raw_response.clone()
+            };
+
+            let now = chrono::Utc::now().to_rfc3339();
+
+            match toml::from_str::<reference::ReferenceComponent>(&toml_str) {
+                Ok(mut comp) => {
+                    if comp.identity.created.is_empty() {
+                        comp.identity.created = now.clone();
+                    }
+                    if comp.identity.updated.is_empty() {
+                        comp.identity.updated = now;
+                    }
+                    match reference::save(&comp) {
+                        Ok(saved_slug) => {
+                            if !self.active_refs.contains(&saved_slug) {
+                                self.active_refs.push(saved_slug.clone());
+                            }
+                            self.conversation.add("system",
+                                &format!("Saved reference '{}' as {saved_slug}.toml", comp.identity.name));
+                            self.refresh_refs_panel();
+                        }
+                        Err(e) => self.conversation.add("system", &format!("Failed to save: {e}")),
+                    }
+                }
+                Err(e) => {
+                    self.conversation.add("system",
+                        &format!("Failed to parse reference TOML: {e}\nTry `/ref refresh {}` to retry.", pending.name));
+                }
             }
         }
     }
@@ -1425,7 +1537,12 @@ impl<'a> App<'a> {
                 match result {
                     Ok(response) => {
                         self.conversation.add("assistant", &response);
-                        self.conversation.add("system", "Save as reference? (yes/no)");
+                        if name.contains(',') {
+                            // Batch result — multiple components
+                            self.conversation.add("system", "Save all references? (yes/no)");
+                        } else {
+                            self.conversation.add("system", "Save as reference? (yes/no)");
+                        }
                         self.ref_confirm_pending = Some(PendingReference {
                             name,
                             raw_response: response,
