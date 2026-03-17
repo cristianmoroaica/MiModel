@@ -183,6 +183,21 @@ impl<'a> App<'a> {
 
         // Keep layout phase in sync with app phase
         self.layout_config.phase = self.phase;
+
+        // Dynamic input bar height: grows with line count (1 line per row + 2 for border).
+        let line_count = self.input_bar.textarea.lines().len();
+        self.layout_config.input_height = (line_count as u16 + 2).clamp(3, 7);
+
+        // Phase-aware placeholder text
+        let placeholder = match self.phase {
+            Phase::Spec => "Describe what you want to build...",
+            Phase::Decompose => "Describe changes to the component tree...",
+            Phase::Component => "Feedback, 'approve', or 'undo'...",
+            Phase::Assembly => "Assembly instructions or feedback...",
+            Phase::Refinement => "Parameter changes or feedback...",
+        };
+        self.input_bar.set_placeholder(placeholder);
+
         let panes = compute_layout(area, &self.layout_config);
 
         // Cache panel Rects for mouse hit-testing

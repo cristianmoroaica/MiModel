@@ -40,9 +40,16 @@ impl<'a> InputBar<'a> {
     }
 
     fn set_textarea_content(&mut self, text: String) {
-        self.textarea = TextArea::new(vec![text]);
+        // Split on actual newlines so multi-line text is stored correctly.
+        let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+        self.textarea = TextArea::new(lines);
         self.textarea.set_cursor_line_style(Style::default());
         self.textarea.set_block(Self::make_block());
+    }
+
+    /// Set the placeholder text shown when the textarea is empty.
+    pub fn set_placeholder(&mut self, placeholder: &str) {
+        self.textarea.set_placeholder_text(placeholder);
     }
 
     /// Handle input event. Returns Some(text) if user submitted (Enter).
@@ -53,10 +60,12 @@ impl<'a> InputBar<'a> {
             Input { key: Key::Enter, ctrl: false, alt: false, .. } => {
                 let current = self.textarea.lines().join("\n");
                 if current.ends_with('\\') {
-                    // Continuation: strip backslash, add actual newline
-                    let trimmed = current.trim_end_matches('\\').to_string();
+                    // Continuation: strip trailing backslash, add an actual newline.
+                    // trim_end_matches strips ALL trailing backslashes; we only want one.
+                    let trimmed = &current[..current.len() - 1];
                     self.set_textarea_content(format!("{trimmed}\n"));
-                    // Move cursor to end
+                    // Move cursor to the end of the last line.
+                    self.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
                     self.textarea.move_cursor(tui_textarea::CursorMove::End);
                     None
                 } else {

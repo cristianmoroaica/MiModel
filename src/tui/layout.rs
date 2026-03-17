@@ -24,11 +24,13 @@ pub struct LayoutConfig {
     pub show_sidebar: bool,
     pub show_model_panel: bool,
     pub phase: Phase,
+    /// Height of the input bar in rows (default 3, grows with line count, capped at 7).
+    pub input_height: u16,
 }
 
 impl Default for LayoutConfig {
     fn default() -> Self {
-        Self { show_sidebar: true, show_model_panel: true, phase: Phase::Spec }
+        Self { show_sidebar: true, show_model_panel: true, phase: Phase::Spec, input_height: 3 }
     }
 }
 
@@ -40,12 +42,12 @@ pub fn compute_layout(area: Rect, config: &LayoutConfig) -> PaneAreas {
     let show_sidebar = config.show_sidebar && width >= 100;
     let show_model = config.show_model_panel && width >= 60;
 
-    // Split vertically: main area + input bar (5 lines) + legend (1 line)
+    // Split vertically: main area + input bar (dynamic height) + legend (1 line)
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(5),
-            Constraint::Length(5),
+            Constraint::Length(config.input_height),
             Constraint::Length(1),
         ])
         .split(area);
@@ -106,7 +108,7 @@ mod tests {
         let panes = compute_layout(area, &config);
         assert!(panes.left_panel.is_some());
         assert!(panes.right_panel.is_some());
-        assert_eq!(panes.input_bar.height, 5);
+        assert_eq!(panes.input_bar.height, 3); // default input_height
     }
 
     #[test]
@@ -130,7 +132,7 @@ mod tests {
     #[test]
     fn test_layout_with_phase() {
         let area = Rect::new(0, 0, 120, 40);
-        let config = LayoutConfig { show_sidebar: true, show_model_panel: true, phase: Phase::Component };
+        let config = LayoutConfig { show_sidebar: true, show_model_panel: true, phase: Phase::Component, input_height: 3 };
         let panes = compute_layout(area, &config);
         // Layout dimensions are the same regardless of phase
         assert!(panes.left_panel.is_some());
