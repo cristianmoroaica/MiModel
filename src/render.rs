@@ -20,7 +20,7 @@ pub fn phase_indicator_spans(
     let current_idx = phase.index();
 
     let label = match phase {
-        Phase::Component if components_len > 0 => {
+        Phase::Build if components_len > 0 => {
             let current = current_component_idx.unwrap_or(0) + 1;
             let name = current_component_name.unwrap_or("?");
             format!("{} {}/{}: {}", phase.label(), current, components_len, name)
@@ -33,7 +33,7 @@ pub fn phase_indicator_spans(
     ));
 
     // Phase dots
-    for i in 0..5 {
+    for i in 0..3 {
         let (dot, color) = if i == current_idx {
             ("●", Color::Rgb(249, 226, 175))
         } else if i < current_idx {
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn phase_indicator_component_with_progress() {
-        let spans = phase_indicator_spans(Phase::Component, Some(1), 5, Some("Case Body"));
+        let spans = phase_indicator_spans(Phase::Build, Some(1), 5, Some("Case Body"));
         let label_content = &spans[0].content;
         assert!(label_content.contains("2/5"));
         assert!(label_content.contains("Case Body"));
@@ -115,9 +115,9 @@ mod tests {
 
     #[test]
     fn phase_indicator_component_empty_list() {
-        let spans = phase_indicator_spans(Phase::Component, None, 0, None);
+        let spans = phase_indicator_spans(Phase::Build, None, 0, None);
         let label_content = &spans[0].content;
-        assert!(label_content.contains("Component"));
+        assert!(label_content.contains("Build"));
         assert!(!label_content.contains('/'));
     }
 }

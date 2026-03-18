@@ -149,8 +149,8 @@ impl<'a> App<'a> {
         // For now, just transition to Component phase
 
         self.conversation.add("system", "Component structure approved! Transitioning to Component phase.");
-        self.phase = Phase::Component;
-        self.layout_config.phase = Phase::Component;
+        self.phase = Phase::Build;
+        self.layout_config.phase = Phase::Build;
         self.claude.session_id = None; // Fresh session for Component phase
         self.session.save(self.phase);
     }
@@ -160,47 +160,37 @@ impl<'a> App<'a> {
         // Will be implemented in Chunk 6: send decompose prompt, parse component tree
     }
 
-    // -- Assembly phase --
+    // -- Build phase --
 
-    pub(crate) fn handle_assembly_input(&mut self, text: &str) {
-        let trimmed = text.trim().to_lowercase();
-        if trimmed == "approve" || trimmed == "ok" || trimmed == "done" {
-            // Approve assembly, move to Refinement
-            self.conversation.add("system", "Assembly approved! Transitioning to Refinement phase.");
-            self.phase = Phase::Refinement;
-            self.layout_config.phase = Phase::Refinement;
-            self.claude.session_id = None;
-            self.session.save(self.phase);
-        } else {
-            // Send feedback about assembly to Claude
-            self.send_assembly_feedback(text);
-        }
-    }
-
-    pub(crate) fn send_assembly_feedback(&mut self, text: &str) {
+    pub(crate) fn send_build_prompt(&mut self, text: &str, images: Vec<PathBuf>) {
         let session_dir = self.session.active_dir.clone();
         let mcp_config = claude_bridge::generate_mcp_config(
-            "assembly", session_dir.as_deref()
+            "build", session_dir.as_deref()
         ).ok();
         let ctx = self.build_phase_context();
-        self.claude.send_phase_prompt("assembly", text, &[], ctx.as_deref(), mcp_config);
+        self.claude.send_phase_prompt("build", text, &images, ctx.as_deref(), mcp_config);
     }
 
-    // -- Refinement phase --
+    // -- Refine phase --
 
-    pub(crate) fn handle_refinement_input(&mut self, text: &str) {
+    pub(crate) fn send_refine_prompt(&mut self, text: &str, images: Vec<PathBuf>) {
         let trimmed = text.trim().to_lowercase();
 
         if trimmed.starts_with("set ") {
-            // Parameter edit mode: "set PARAM_NAME value"
-            // e.g., "set OUTER_DIAMETER 42.0"
             self.handle_param_edit(text);
-        } else if trimmed == "export" {
-            self.handle_export();
-        } else {
-            // Text feedback — scoped Claude call for one component
-            self.send_refinement_feedback(text);
+            return;
         }
+        if trimmed == "export" {
+            self.handle_export();
+            return;
+        }
+
+        let session_dir = self.session.active_dir.clone();
+        let mcp_config = claude_bridge::generate_mcp_config(
+            "refine", session_dir.as_deref()
+        ).ok();
+        let ctx = self.build_phase_context();
+        self.claude.send_phase_prompt("refine", text, &images, ctx.as_deref(), mcp_config);
     }
 
     pub(crate) fn handle_param_edit(&mut self, text: &str) {
@@ -233,14 +223,6 @@ impl<'a> App<'a> {
         self.conversation.add("system", "Parameter edit acknowledged. Full paramset integration pending PhaseSession wiring.");
     }
 
-    pub(crate) fn send_refinement_feedback(&mut self, text: &str) {
-        let session_dir = self.session.active_dir.clone();
-        let mcp_config = claude_bridge::generate_mcp_config(
-            "refinement", session_dir.as_deref()
-        ).ok();
-        let ctx = self.build_phase_context();
-        self.claude.send_phase_prompt("refinement", text, &[], ctx.as_deref(), mcp_config);
-    }
 
     pub(crate) fn handle_export(&mut self) {
         if let Some(ref session_dir) = self.session.active_dir {
@@ -376,8 +358,8 @@ impl<'a> App<'a> {
         } else {
             // Last component — transition to Assembly
             self.conversation.add("system", "All components approved! Transitioning to Assembly phase.");
-            self.phase = Phase::Assembly;
-            self.layout_config.phase = Phase::Assembly;
+            self.phase = Phase::Build;
+            self.layout_config.phase = Phase::Build;
             self.claude.session_id = None;
             self.session.save(self.phase);
         }

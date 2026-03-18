@@ -153,7 +153,7 @@ mod tests {
             "component_states": []
         }"#;
         let data: PhaseSessionData = serde_json::from_str(json).unwrap();
-        assert_eq!(data.phase, Phase::Component);
+        assert_eq!(data.phase, Phase::Build);
         assert_eq!(data.current_component, Some("case_body".into()));
         assert_eq!(data.claude_sessions.spec, Some("sid_123".into()));
     }

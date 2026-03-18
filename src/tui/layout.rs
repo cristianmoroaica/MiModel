@@ -132,7 +132,7 @@ mod tests {
     #[test]
     fn test_layout_with_phase() {
         let area = Rect::new(0, 0, 120, 40);
-        let config = LayoutConfig { show_sidebar: true, show_model_panel: true, phase: Phase::Component, input_height: 3 };
+        let config = LayoutConfig { show_sidebar: true, show_model_panel: true, phase: Phase::Build, input_height: 3 };
         let panes = compute_layout(area, &config);
         // Layout dimensions are the same regardless of phase
         assert!(panes.left_panel.is_some());

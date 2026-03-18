@@ -162,36 +162,28 @@ impl<'a> App<'a> {
                 }
                 return;
             }
-            // Phase navigation: Alt+1 through Alt+5
+            // Phase navigation: Alt+1 through Alt+3
             (Char('1'), KeyModifiers::ALT) => {
                 self.try_switch_phase(Phase::Spec);
                 return;
             }
             (Char('2'), KeyModifiers::ALT) => {
-                self.try_switch_phase(Phase::Decompose);
+                self.try_switch_phase(Phase::Build);
                 return;
             }
             (Char('3'), KeyModifiers::ALT) => {
-                self.try_switch_phase(Phase::Component);
-                return;
-            }
-            (Char('4'), KeyModifiers::ALT) => {
-                self.try_switch_phase(Phase::Assembly);
-                return;
-            }
-            (Char('5'), KeyModifiers::ALT) => {
-                self.try_switch_phase(Phase::Refinement);
+                self.try_switch_phase(Phase::Refine);
                 return;
             }
             // Component navigation: Ctrl+Left/Right (only in Component phase)
             (Left, KeyModifiers::CONTROL) => {
-                if self.phase == Phase::Component {
+                if self.phase == Phase::Build {
                     self.component_list.select_prev();
                 }
                 return;
             }
             (Right, KeyModifiers::CONTROL) => {
-                if self.phase == Phase::Component {
+                if self.phase == Phase::Build {
                     self.component_list.select_next();
                 }
                 return;

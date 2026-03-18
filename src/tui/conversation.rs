@@ -147,7 +147,9 @@ impl ConversationPane {
             .wrap(Wrap { trim: false });
 
         // Use ratatui's own word-wrap line count for accurate scroll range.
-        let wrapped_lines = paragraph.line_count(area.width) as u16;
+        // Subtract 2 for borders — content wraps in the inner area, not the full width.
+        let inner_width = area.width.saturating_sub(2);
+        let wrapped_lines = paragraph.line_count(inner_width) as u16;
         let visible = area.height.saturating_sub(2); // minus borders
         let max_scroll = wrapped_lines.saturating_sub(visible);
         let scroll = self.scroll_offset.min(max_scroll);

@@ -80,10 +80,10 @@ LIST_FILES_TOOL = {
 SCREENSHOT_VIEWER_TOOL = {
     "name": "screenshot_viewer",
     "description": (
-        "Render a 360° isometric scan of the current model (6 views at 60° increments). "
-        "Returns 6 images showing the model from all angles. Use this after every build "
-        "to verify geometry — check holes, chamfers, proportions, missing features. "
-        "Runs headless (no window needed)."
+        "Render engineering views of the current model: front, top, right (orthographic) "
+        "plus one isometric view. Orthographic views show exact proportions and feature "
+        "positions. Use this after every build to verify spatial correctness — hole positions, "
+        "pocket alignment, symmetry. Coordinate system: +X=right, +Y=forward, +Z=up."
     ),
     "inputSchema": {
         "type": "object",
@@ -148,49 +148,10 @@ SPEC_TOOLS = [
     },
 ]
 
-DECOMPOSE_TOOLS = [
+BUILD_TOOLS = [
     {
         "name": "ask_clarification",
-        "description": "Ask the user a clarifying question about the component decomposition.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "question": {"type": "string", "description": "The question to ask"}
-            },
-            "required": ["question"]
-        }
-    },
-    {
-        "name": "propose_component_tree",
-        "description": "Submit a component decomposition for the user to review.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "components": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "name": {"type": "string"},
-                            "description": {"type": "string"},
-                            "depends_on": {"type": "array", "items": {"type": "string"}},
-                            "assembly_op": {"type": "string", "enum": ["base", "union", "cut", "intersect"]}
-                        },
-                        "required": ["id", "name", "assembly_op"]
-                    },
-                    "description": "List of components with dependencies"
-                }
-            },
-            "required": ["components"]
-        }
-    },
-]
-
-COMPONENT_TOOLS = [
-    {
-        "name": "ask_clarification",
-        "description": "Ask the user a clarifying question about the current component.",
+        "description": "Ask the user a clarifying question about the design or build.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -201,14 +162,13 @@ COMPONENT_TOOLS = [
     },
     {
         "name": "request_approval",
-        "description": "After a successful build, ask the user to approve the component or provide feedback.",
+        "description": "After verifying the build against goal.md, ask the user to approve or provide feedback.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "component_id": {"type": "string", "description": "ID of the component"},
-                "summary": {"type": "string", "description": "Brief summary of what was built"}
+                "summary": {"type": "string", "description": "Brief summary of what was built, including key dimensions"}
             },
-            "required": ["component_id", "summary"]
+            "required": ["summary"]
         }
     },
     WRITE_FILE_TOOL,
@@ -219,30 +179,10 @@ COMPONENT_TOOLS = [
     IMPORT_STEP_TOOL,
 ]
 
-ASSEMBLY_TOOLS = [
+REFINE_TOOLS = [
     {
         "name": "ask_clarification",
-        "description": "Ask the user a clarifying question about the assembly.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "question": {"type": "string", "description": "The question to ask"}
-            },
-            "required": ["question"]
-        }
-    },
-    WRITE_FILE_TOOL,
-    OPEN_VIEWER_TOOL,
-    READ_FILE_TOOL,
-    LIST_FILES_TOOL,
-    SCREENSHOT_VIEWER_TOOL,
-    IMPORT_STEP_TOOL,
-]
-
-REFINEMENT_TOOLS = [
-    {
-        "name": "ask_clarification",
-        "description": "Ask the user a clarifying question about the refinement.",
+        "description": "Ask the user a clarifying question about the aesthetic refinement.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -274,10 +214,13 @@ REFINEMENT_TOOLS = [
 
 PHASE_TOOLS = {
     "spec": SPEC_TOOLS,
-    "decompose": DECOMPOSE_TOOLS,
-    "component": COMPONENT_TOOLS,
-    "assembly": ASSEMBLY_TOOLS,
-    "refinement": REFINEMENT_TOOLS,
+    "build": BUILD_TOOLS,
+    "refine": REFINE_TOOLS,
+    # Backward compat aliases
+    "decompose": BUILD_TOOLS,
+    "component": BUILD_TOOLS,
+    "assembly": BUILD_TOOLS,
+    "refinement": REFINE_TOOLS,
 }
 
 # ── Spec field accumulator ──
@@ -561,10 +504,21 @@ def run_cadquery_build(code, output_dir, session_root=None, label="build"):
         open(building_flag, "w").close()
 
     try:
-        # Build in subprocess to isolate crashes
-        export_code = code + f"""
+        # Write code.py so it can be read back later
+        code_path = os.path.join(output_dir, "code.py")
+        with open(code_path, "w") as f:
+            f.write(code)
 
-# ── Auto-export + analysis ──
+        # Inject session paths so code can find component STEPs via __file__
+        # and os.path.dirname(__file__) resolves to the output_dir
+        preamble = f"""
+import os as _os
+__file__ = "{code_path}"
+_SESSION_DIR = "{session_root or output_dir}"
+"""
+        export_code = preamble + code + f"""
+
+# ── Auto-export + spatial analysis ──
 import cadquery as cq
 from collections import Counter
 cq.exporters.export(result, "{stl_path}")
@@ -572,27 +526,48 @@ cq.exporters.export(result, "{step_path}")
 solid = result.val()
 bb = solid.BoundingBox()
 print(f"DIMS:{{bb.xlen:.2f}}x{{bb.ylen:.2f}}x{{bb.zlen:.2f}}")
+# Spatial position (min/max coordinates)
+print(f"BBOX:min({{bb.xmin:.2f}},{{bb.ymin:.2f}},{{bb.zmin:.2f}}) max({{bb.xmax:.2f}},{{bb.ymax:.2f}},{{bb.zmax:.2f}})")
+# Center of mass
+try:
+    com = solid.Center()
+    print(f"CENTER:{{com.x:.2f}},{{com.y:.2f}},{{com.z:.2f}}")
+except:
+    pass
 # Topology for validation
 faces = result.faces().vals()
 edges = result.edges().vals()
 ft = Counter(f.geomType() for f in faces)
 ft_str = ", ".join(f"{{k}}:{{v}}" for k, v in sorted(ft.items()))
 print(f"TOPO:{{len(faces)}}f {{len(edges)}}e | {{ft_str}}")
-# Detect cylindrical features (holes/bosses)
+# Detect cylindrical features with positions
 cyls = [f for f in faces if f.geomType() == "CYLINDER"]
 if cyls:
     try:
         from OCP.BRepAdaptor import BRepAdaptor_Surface
         from OCP.GeomAbs import GeomAbs_Cylinder
-        radii = Counter()
+        features = []
         for f in cyls:
             a = BRepAdaptor_Surface(f.wrapped)
             if a.GetType() == GeomAbs_Cylinder:
-                r = round(a.Cylinder().Radius(), 2)
-                radii[r] += 1
-        holes = " ".join(f"{{c}}x d{{r*2}}mm" for r, c in sorted(radii.items()))
-        if holes:
-            print(f"HOLES:{{holes}}")
+                cyl = a.Cylinder()
+                r = round(cyl.Radius(), 2)
+                loc = cyl.Location()
+                ax = cyl.Axis().Direction()
+                features.append((r, round(loc.X(),1), round(loc.Y(),1), round(loc.Z(),1),
+                                 round(ax.X(),1), round(ax.Y(),1), round(ax.Z(),1)))
+        if features:
+            # Group by radius
+            from itertools import groupby
+            features.sort(key=lambda f: f[0])
+            parts = []
+            for r, group in groupby(features, key=lambda f: f[0]):
+                items = list(group)
+                positions = " ".join(f"@({{x}},{{y}},{{z}})" for _, x, y, z, *_ in items)
+                axis = items[0][4:]
+                ax_str = f"along({{axis[0]}},{{axis[1]}},{{axis[2]}})" if axis != (0,0,1) and axis != (0.0,0.0,1.0) else "vertical"
+                parts.append(f"{{len(items)}}x d{{r*2}}mm {{ax_str}} {{positions}}")
+            print(f"HOLES:" + " | ".join(parts))
     except:
         pass
 """
@@ -608,9 +583,15 @@ if cyls:
         dims = "unknown"
         topo = ""
         holes = ""
+        bbox = ""
+        center = ""
         for line in proc.stdout.splitlines():
             if line.startswith("DIMS:"):
                 dims = line[5:]
+            elif line.startswith("BBOX:"):
+                bbox = line[5:]
+            elif line.startswith("CENTER:"):
+                center = line[7:]
             elif line.startswith("TOPO:"):
                 topo = line[5:]
             elif line.startswith("HOLES:"):
@@ -622,7 +603,7 @@ if cyls:
                 if os.path.exists(src):
                     shutil.copy2(src, os.path.join(session_root, name))
 
-        return {"success": True, "dimensions": dims, "topology": topo, "holes": holes, "stl_path": stl_path, "step_path": step_path}
+        return {"success": True, "dimensions": dims, "topology": topo, "holes": holes, "bbox": bbox, "center": center, "stl_path": stl_path, "step_path": step_path}
 
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "Build timed out after 60 seconds"}
@@ -634,18 +615,26 @@ if cyls:
 
 # ── Model scan (headless f3d rendering) ──
 
-SCAN_ANGLES = [
-    (  0, 30, "front-right"),
-    ( 60, 30, "right"),
-    (120, 30, "back-right"),
-    (180, 30, "back-left"),
-    (240, 30, "left"),
-    (300, 30, "front-left"),
+# Engineering views: all 6 orthographic faces + 2 isometric.
+# Dead-on orthographic projection for accurate proportions.
+# HDRI ambient (-f) + tone mapping (-t) + ambient occlusion (-q) reveals
+# surface detail (debossed text, standoffs, pockets) without tilting camera.
+SCAN_VIEWS = [
+    {"label": "front",      "args": ["--camera-direction", "+Y", "--camera-orthographic"],              "desc": "Front view (XZ plane)"},
+    {"label": "back",       "args": ["--camera-direction", "-Y", "--camera-orthographic"],              "desc": "Back view (XZ plane)"},
+    {"label": "right",      "args": ["--camera-direction", "-X", "--camera-orthographic"],              "desc": "Right view (YZ plane)"},
+    {"label": "left",       "args": ["--camera-direction", "+X", "--camera-orthographic"],              "desc": "Left view (YZ plane)"},
+    {"label": "top",        "args": ["--camera-direction", "-Z", "--camera-orthographic", "--up", "+Y"], "desc": "Top view (XY plane, looking down)"},
+    {"label": "bottom",     "args": ["--camera-direction", "+Z", "--camera-orthographic", "--up", "+Y"], "desc": "Bottom view (XY plane, looking up)"},
+    {"label": "iso-top",    "args": ["--camera-azimuth-angle", "30",  "--camera-elevation-angle", "30"],  "desc": "Isometric top-front"},
+    {"label": "iso-bottom", "args": ["--camera-azimuth-angle", "210", "--camera-elevation-angle", "-30"], "desc": "Isometric bottom-back"},
 ]
+SCAN_MATERIAL = ["--no-config", "--color", "#d8d8d8", "--roughness", "1", "--metallic", "0", "-f", "-t", "-q"]
 
 def scan_model(session_dir):
-    """Render 6 isometric views of the current model using headless f3d.
-    Returns MCP content blocks: one text label + 6 images."""
+    """Render engineering views of the current model using headless f3d.
+    Returns 4 images: front, top, right (orthographic) + isometric.
+    Coordinate system: +X=right, +Y=forward, +Z=up."""
     import subprocess
     import base64
     import tempfile
@@ -654,7 +643,6 @@ def scan_model(session_dir):
     if not session_dir:
         return [{"type": "text", "text": "No session directory set."}]
 
-    # Find the model to render
     stl_path = os.path.join(session_dir, "_buffer.stl")
     if not os.path.exists(stl_path):
         return [{"type": "text", "text": "No model built yet. Write code first."}]
@@ -664,52 +652,40 @@ def scan_model(session_dir):
         return [{"type": "text", "text": "f3d not found. Install f3d for model scanning."}]
 
     tmp_dir = tempfile.mkdtemp(prefix="mimodel_scan_")
-    content = []
+    content = [{"type": "text", "text": "Engineering views (coordinate system: +X=right, +Y=forward, +Z=up):"}]
     errors = []
 
     try:
-        # Launch all 6 renders in parallel
+        # Launch all renders in parallel
         procs = []
-        for az, el, label in SCAN_ANGLES:
-            out_path = os.path.join(tmp_dir, f"{label}.png")
-            proc = subprocess.Popen(
-                [f3d_bin,
-                 "--output", out_path,
-                 "--resolution", "400,300",
-                 "--camera-azimuth-angle", str(az),
-                 "--camera-elevation-angle", str(el),
-                 "--no-background",
-                 "--up", "+Z",
-                 "-g",
-                 stl_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            procs.append((proc, out_path, label))
+        for view in SCAN_VIEWS:
+            out_path = os.path.join(tmp_dir, f"{view['label']}.png")
+            cmd = [f3d_bin, "--output", out_path, "--resolution", "800,600",
+                   "--no-background", "--up", "+Z"]
+            cmd.extend(SCAN_MATERIAL)
+            cmd.extend(view["args"])
+            cmd.append(stl_path)
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            procs.append((proc, out_path, view))
 
-        # Collect results
-        for proc, out_path, label in procs:
+        for proc, out_path, view in procs:
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                errors.append(f"{label}: timed out")
+                errors.append(f"{view['label']}: timed out")
                 continue
 
-            if proc.returncode != 0:
-                errors.append(f"{label}: f3d error")
-                continue
-
-            if not os.path.exists(out_path):
-                errors.append(f"{label}: no output")
+            if proc.returncode != 0 or not os.path.exists(out_path):
+                errors.append(f"{view['label']}: render failed")
                 continue
 
             with open(out_path, "rb") as f:
                 data = base64.standard_b64encode(f.read()).decode("ascii")
-            content.append({"type": "text", "text": f"View: {label} (azimuth {SCAN_ANGLES[len(content) // 2][0]}°)"})
+            content.append({"type": "text", "text": view["desc"]})
             content.append({"type": "image", "data": data, "mimeType": "image/png"})
 
-        if not content:
+        if len(content) <= 1:
             return [{"type": "text", "text": f"All renders failed: {'; '.join(errors)}"}]
 
         if errors:
@@ -814,10 +790,15 @@ def handle_tool_call(name, arguments, session_dir):
             result = run_cadquery_build(content, output_dir, session_root=session_dir, label=label)
             if result["success"]:
                 build_info = f"File written: {rel_path}\nBuild successful! Dimensions: {result['dimensions']}mm."
+                if result.get("bbox"):
+                    build_info += f"\nBounding box: {result['bbox']}"
+                if result.get("center"):
+                    build_info += f"\nCenter of mass: ({result['center']})"
                 if result.get("topology"):
                     build_info += f"\nTopology: {result['topology']}"
                 if result.get("holes"):
                     build_info += f"\nCylindrical features: {result['holes']}"
+                build_info += "\nCoordinate system: +X=right, +Y=forward, +Z=up"
                 build_info += "\nViewer will auto-reload. Use screenshot_viewer to verify geometry."
                 return [{"type": "text", "text": build_info}]
             else:
@@ -850,8 +831,18 @@ def handle_tool_call(name, arguments, session_dir):
         if not os.path.isfile(full_path):
             return [{"type": "text", "text": f"Not a file: {rel_path}. Use list_files to browse directories."}]
         ext = os.path.splitext(full_path)[1].lower()
-        if ext in (".stl", ".step", ".stp", ".png", ".jpg", ".jpeg", ".pdf"):
-            return [{"type": "text", "text": f"Cannot read binary file ({ext}). For STL metadata, read {rel_path}.json if it exists."}]
+        # Return images as visual content so Claude can see them
+        if ext in (".png", ".jpg", ".jpeg"):
+            import base64
+            try:
+                with open(full_path, "rb") as f:
+                    data = base64.standard_b64encode(f.read()).decode("ascii")
+                mime = "image/png" if ext == ".png" else "image/jpeg"
+                return [{"type": "image", "data": data, "mimeType": mime}]
+            except Exception as e:
+                return [{"type": "text", "text": f"Error reading image: {e}"}]
+        if ext in (".stl", ".step", ".stp", ".pdf"):
+            return [{"type": "text", "text": f"Cannot read binary file ({ext})."}]
         try:
             with open(full_path, "r") as f:
                 content = f.read(100_000)

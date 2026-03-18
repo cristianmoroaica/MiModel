@@ -277,7 +277,7 @@ mod tests {
             60,
             "python".to_string(),
         );
-        session.phase = Phase::Decompose;
+        session.phase = Phase::Build;
         session.init_components(&[("body", "Body")]).unwrap();
         session.save().unwrap();
 
@@ -288,7 +288,7 @@ mod tests {
             60,
             "python".to_string(),
         ).unwrap();
-        assert_eq!(loaded.phase, Phase::Decompose);
+        assert_eq!(loaded.phase, Phase::Build);
         assert_eq!(loaded.components.len(), 1);
         assert_eq!(loaded.components[0].id, "body");
     }

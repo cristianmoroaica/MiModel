@@ -170,7 +170,12 @@ pub fn send_prompt(
     }
 
     if disable_builtin_tools {
-        cmd.arg("--tools").arg("");
+        if image_paths.is_empty() {
+            cmd.arg("--tools").arg("");
+        } else {
+            // Keep Read tool available so Claude can view attached images
+            cmd.arg("--allowedTools").arg("Read");
+        }
         cmd.arg("--strict-mcp-config");
         cmd.arg("--disallowedTools").arg("LSP");
     }

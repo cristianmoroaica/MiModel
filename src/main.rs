@@ -201,10 +201,8 @@ impl<'a> App<'a> {
         // Phase-aware placeholder text
         let placeholder = match self.phase {
             Phase::Spec => "Describe what you want to build...",
-            Phase::Decompose => "Describe changes to the component tree...",
-            Phase::Component => "Feedback, 'approve', or 'undo'...",
-            Phase::Assembly => "Assembly instructions or feedback...",
-            Phase::Refinement => "Parameter changes or feedback...",
+            Phase::Build => "Build instructions, feedback, or 'approve'...",
+            Phase::Refine => "Aesthetic changes: chamfers, fillets, finish...",
         };
         self.input_bar.set_placeholder(placeholder);
 
@@ -601,26 +599,23 @@ impl<'a> App<'a> {
         if clean_text.trim().eq_ignore_ascii_case("advance") {
             match self.phase {
                 Phase::Spec => {
-                    self.phase = Phase::Decompose;
-                    self.layout_config.phase = Phase::Decompose;
+                    self.phase = Phase::Build;
+                    self.layout_config.phase = Phase::Build;
                     self.claude.session_id = None;
-                    self.conversation.add("system", "Advanced to Decompose phase.");
+                    self.conversation.add("system", "Advanced to Build phase.");
                     self.session.save(self.phase);
                     self.dirty = true;
                 }
-                Phase::Decompose => {
-                    self.conversation.add("system", "Use 'approve' to accept the component tree first.");
-                }
-                Phase::Assembly => {
-                    self.phase = Phase::Refinement;
-                    self.layout_config.phase = Phase::Refinement;
+                Phase::Build => {
+                    self.phase = Phase::Refine;
+                    self.layout_config.phase = Phase::Refine;
                     self.claude.session_id = None;
-                    self.conversation.add("system", "Advanced to Refinement phase.");
+                    self.conversation.add("system", "Advanced to Refine phase. Functionality is locked — focus on aesthetics.");
                     self.session.save(self.phase);
                     self.dirty = true;
                 }
-                _ => {
-                    self.conversation.add("system", "Cannot advance from this phase.");
+                Phase::Refine => {
+                    self.conversation.add("system", "Already in the final phase.");
                 }
             }
             return;
@@ -630,38 +625,18 @@ impl<'a> App<'a> {
         match self.phase {
             Phase::Spec => {
                 self.send_spec_prompt(&clean_text, all_images);
-                return;
             }
-            Phase::Decompose => {
-                if clean_text.trim().eq_ignore_ascii_case("approve") {
-                    self.approve_decomposition();
-                    return;
-                }
-                // Otherwise, send as feedback to Claude
-                self.send_decompose_prompt(&clean_text);
-                return;
-            }
-            Phase::Component => {
+            Phase::Build => {
                 let trimmed = clean_text.trim().to_lowercase();
-                if trimmed == "approve" || trimmed == "ok" || trimmed == "next" {
-                    self.approve_current_component();
-                } else if trimmed == "undo" {
+                if trimmed == "undo" {
                     self.undo_component();
                 } else {
-                    // Text feedback — refine current component
-                    self.send_component_feedback(&clean_text, all_images);
+                    self.send_build_prompt(&clean_text, all_images);
                 }
-                return;
             }
-            Phase::Assembly => {
-                self.handle_assembly_input(&clean_text);
-                return;
+            Phase::Refine => {
+                self.send_refine_prompt(&clean_text, all_images);
             }
-            Phase::Refinement => {
-                self.handle_refinement_input(&clean_text);
-                return;
-            }
-            // All phases are explicitly handled above — no fall-through to legacy path.
         }
     }
 
@@ -979,14 +954,14 @@ impl<'a> App<'a> {
         }
 
         // Include component context for Component phase
-        if self.phase == Phase::Component {
+        if self.phase == Phase::Build {
             if let Some(comp_ctx) = self.build_component_context() {
                 parts.push(comp_ctx);
             }
         }
 
         // Include prior build dimensions for Assembly/Refinement
-        if matches!(self.phase, Phase::Assembly | Phase::Refinement) {
+        if matches!(self.phase, Phase::Build | Phase::Refine) {
             if let Some(build_ctx) = self.build_prior_builds_context() {
                 parts.push(build_ctx);
             }
@@ -1017,25 +992,8 @@ impl<'a> App<'a> {
                                 self.handle_spec_response(&response);
                                 self.claude.busy = BusyState::Idle;
                             }
-                            Phase::Decompose => {
-                                self.handle_decompose_response(&response);
-                                self.claude.busy = BusyState::Idle;
-                            }
-                            Phase::Component => {
-                                // Parse response for cadquery code block
-                                let parsed = parser::parse_response(&response);
-                                if let Some(code_block) = parsed.code {
-                                    // Build the component
-                                    self.claude.busy = BusyState::Building;
-                                    let build_result = self.session.build(&code_block.code, code_block.engine);
-                                    self.handle_component_build_result(build_result, code_block.code);
-                                } else {
-                                    // No code in response — just a conversation message
-                                    self.claude.busy = BusyState::Idle;
-                                }
-                            }
-                            Phase::Assembly => {
-                                // Assembly responses may contain code to rebuild, or just conversation
+                            Phase::Build | Phase::Refine => {
+                                // Build/Refine responses may contain code blocks
                                 let parsed = parser::parse_response(&response);
                                 if let Some(code_block) = parsed.code {
                                     self.claude.busy = BusyState::Building;
@@ -1045,18 +1003,6 @@ impl<'a> App<'a> {
                                     self.claude.busy = BusyState::Idle;
                                 }
                             }
-                            Phase::Refinement => {
-                                // Refinement responses may contain updated code
-                                let parsed = parser::parse_response(&response);
-                                if let Some(code_block) = parsed.code {
-                                    self.claude.busy = BusyState::Building;
-                                    let result = self.session.build(&code_block.code, code_block.engine);
-                                    self.handle_build_result(result);
-                                } else {
-                                    self.claude.busy = BusyState::Idle;
-                                }
-                            }
-                            // All phases are explicitly handled above — no catch-all build path.
                         }
                     }
                     Err(e) => {
@@ -1189,7 +1135,7 @@ impl<'a> App<'a> {
                     }
 
                     // Crash recovery hint
-                    if phase == Phase::Component {
+                    if phase == Phase::Build {
                         self.conversation.add("system",
                             "Tip: If the last build was interrupted, type 'undo' to restore the previous state.");
                     }
@@ -1432,8 +1378,8 @@ impl<'a> App<'a> {
                 ));
 
                 // Jump to Component phase for editing
-                self.phase = Phase::Component;
-                self.layout_config.phase = Phase::Component;
+                self.phase = Phase::Build;
+                self.layout_config.phase = Phase::Build;
 
                 self.session.save(self.phase);
                 self.refresh_projects();
