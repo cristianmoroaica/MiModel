@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const CACHE_TTL: Duration = Duration::from_secs(60);
+const CACHE_TTL: Duration = Duration::from_secs(300);
 const CREDENTIALS_PATH: &str = ".claude/.credentials.json";
 
 #[derive(Debug, Clone, Default)]

@@ -172,7 +172,11 @@ impl<'a> App<'a> {
             active_refs: Vec::new(),
             ref_confirm_pending: None,
             build_timeout,
-            usage_monitor: usage::UsageMonitor::new(),
+            usage_monitor: {
+                let m = usage::UsageMonitor::new();
+                m.maybe_refresh(); // fetch once at startup
+                m
+            },
         })
     }
 
@@ -212,16 +216,9 @@ impl<'a> App<'a> {
         self.panel_rects.right_panel = panes.right_panel.unwrap_or_default();
         self.panel_rects.input = panes.input_bar;
 
-        // Render left panel (phase-aware)
+        // Render left panel — always show project tree (components visible inside session)
         if let Some(left_area) = panes.left_panel {
-            match self.phase {
-                Phase::Spec | Phase::Decompose => {
-                    self.project_tree.render(frame, left_area, self.focus == Focus::ProjectTree);
-                }
-                Phase::Component | Phase::Assembly | Phase::Refinement => {
-                    self.component_list.render(frame, left_area, self.focus == Focus::ProjectTree);
-                }
-            }
+            self.project_tree.render(frame, left_area, self.focus == Focus::ProjectTree);
         }
 
         // Render conversation with spinner if busy
@@ -331,7 +328,6 @@ impl<'a> App<'a> {
         render::render_legend_bar(frame, legend_area, self.focus, phase_spans);
 
         // Render usage stats (right-aligned overlay on legend bar)
-        self.usage_monitor.maybe_refresh();
         let usage_stats = self.usage_monitor.stats();
         tui::status_bar::render_usage_bar(frame, legend_area, &usage_stats);
     }
@@ -531,6 +527,7 @@ impl<'a> App<'a> {
                     .map(|p| p.path.clone())
                     .unwrap_or_else(|| storage::project::root_dir().join("Untitled"));
                 let session_dir = project_path.join(&session_name);
+                self.viewer.set_working_dir(&session_dir);
                 self.session.active_name = Some(session_name);
                 self.session.active_dir = Some(session_dir);
             }
@@ -935,6 +932,8 @@ impl<'a> App<'a> {
     }
 
     fn handle_bg_result(&mut self, result: BackgroundResult) {
+        // Refresh usage stats after each API interaction (cached, won't spam)
+        self.usage_monitor.maybe_refresh();
         match result {
             BackgroundResult::ClaudeResponse { result, session_id } => {
                 // Update session_id
@@ -1116,15 +1115,13 @@ impl<'a> App<'a> {
                         "Resumed session '{}' in {} phase.", session_name, phase.label()
                     ));
 
-                    // Restore viewer with working.stl if it exists
+                    // Point viewer at session directory so f3d watches the right file
+                    self.viewer.set_working_dir(&session_dir);
+
+                    // Launch viewer if working.stl exists
                     let working_stl = session_dir.join("working.stl");
-                    if working_stl.exists() {
-                        if let Err(e) = self.viewer.update_working_stl(&working_stl) {
-                            self.conversation.add("system", &format!("Warning: {e}"));
-                        }
-                        if !self.viewer.is_running() {
-                            let _ = self.viewer.show();
-                        }
+                    if working_stl.exists() && !self.viewer.is_running() {
+                        let _ = self.viewer.show();
                     }
 
                     // Crash recovery hint
@@ -1345,15 +1342,10 @@ impl<'a> App<'a> {
                 }
             }
             "submit_cadquery_code" | "submit_assembly_code" | "submit_code_patch" => {
-                // Build happened in MCP server -- detect new files and refresh viewer
-                if let Some(ref dir) = self.session.active_dir {
-                    let working_stl = dir.join("working.stl");
-                    if working_stl.exists() {
-                        let _ = self.viewer.update_working_stl(&working_stl);
-                        if !self.viewer.is_running() {
-                            let _ = self.viewer.show();
-                        }
-                    }
+                // Build happened in MCP server — working.stl already written to session dir.
+                // Viewer's working_dir points there, so just launch if not running.
+                if !self.viewer.is_running() {
+                    let _ = self.viewer.show();
                 }
                 self.right_panel.set_model("Build complete -- check 3D viewer");
             }
@@ -1369,6 +1361,13 @@ impl<'a> App<'a> {
                 let mut content = self.right_panel.spec_content.clone();
                 content.push_str(&format!("\nUpdated: {} = {}", pname, new_val));
                 self.right_panel.set_spec(&content);
+            }
+            "open_viewer" => {
+                // Signal file is handled in poll loop; this ensures
+                // the viewer opens if the tool call arrives via streaming too
+                if !self.viewer.is_running() {
+                    let _ = self.viewer.show();
+                }
             }
             _ => {} // Unknown tool -- ignore
         }
@@ -1597,6 +1596,22 @@ fn run_event_loop(
                     app.claude.busy = BusyState::Thinking;
                     app.dirty = true;
                 }
+            }
+        }
+
+        // Poll .open_viewer signal from MCP server
+        if let Some(ref dir) = app.session.active_dir {
+            let signal = dir.join(".open_viewer");
+            if signal.exists() {
+                let _ = std::fs::remove_file(&signal);
+                let working_stl = dir.join("working.stl");
+                if working_stl.exists() {
+                    let _ = app.viewer.update_working_stl(&working_stl);
+                    if !app.viewer.is_running() {
+                        let _ = app.viewer.show();
+                    }
+                }
+                app.dirty = true;
             }
         }
 

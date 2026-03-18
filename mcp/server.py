@@ -100,6 +100,50 @@ DECOMPOSE_TOOLS = [
     },
 ]
 
+OPEN_VIEWER_TOOL = {
+    "name": "open_viewer",
+    "description": "Open the current model in the 3D viewer (f3d). Use this when the user asks to see or view the model.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+}
+
+READ_FILE_TOOL = {
+    "name": "read_file",
+    "description": "Read a file from the session directory. Use relative paths like 'components/body/code.py', 'refinement/code.py', 'working.stl.json', 'spec.toml', etc. Only text files can be read (not binary STL/STEP).",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Relative path within the session directory"}
+        },
+        "required": ["path"]
+    }
+}
+
+LIST_FILES_TOOL = {
+    "name": "list_files",
+    "description": "List files in the session directory (or a subdirectory). Shows the project file tree so you can find code, specs, and build artifacts.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Relative subdirectory path (empty string or '.' for session root)", "default": "."}
+        },
+        "required": []
+    }
+}
+
+SCREENSHOT_VIEWER_TOOL = {
+    "name": "screenshot_viewer",
+    "description": "Capture a screenshot of the f3d 3D viewer window and return it as an image. Use this to visually verify your build results — check geometry, holes, chamfers, proportions, etc.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+}
+
 COMPONENT_TOOLS = [
     {
         "name": "ask_clarification",
@@ -114,7 +158,7 @@ COMPONENT_TOOLS = [
     },
     {
         "name": "submit_cadquery_code",
-        "description": "Submit CadQuery Python code for a component. The code will be built and the result displayed in the 3D viewer. All tunable parameters should be UPPERCASE constants at the top.",
+        "description": "Submit CadQuery Python code for a component. The code is executed immediately: it builds the STL, exports to components/<id>/result.stl, and updates working.stl which the 3D viewer auto-reloads. All tunable parameters should be UPPERCASE constants at the top.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -136,6 +180,10 @@ COMPONENT_TOOLS = [
             "required": ["component_id", "summary"]
         }
     },
+    OPEN_VIEWER_TOOL,
+    READ_FILE_TOOL,
+    LIST_FILES_TOOL,
+    SCREENSHOT_VIEWER_TOOL,
 ]
 
 ASSEMBLY_TOOLS = [
@@ -152,7 +200,7 @@ ASSEMBLY_TOOLS = [
     },
     {
         "name": "submit_assembly_code",
-        "description": "Submit CadQuery assembly code that combines approved components. Component STEPs are in components/<id>/result.step.",
+        "description": "Submit CadQuery assembly code that combines approved components. The code is executed immediately: it builds the STL, exports to assembly/result.stl, and updates working.stl which the 3D viewer auto-reloads. Component STEPs are in components/<id>/result.step.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -161,6 +209,10 @@ ASSEMBLY_TOOLS = [
             "required": ["code"]
         }
     },
+    OPEN_VIEWER_TOOL,
+    READ_FILE_TOOL,
+    LIST_FILES_TOOL,
+    SCREENSHOT_VIEWER_TOOL,
 ]
 
 REFINEMENT_TOOLS = [
@@ -190,7 +242,7 @@ REFINEMENT_TOOLS = [
     },
     {
         "name": "submit_code_patch",
-        "description": "Submit modified CadQuery code with parameter changes applied.",
+        "description": "Submit modified CadQuery code with parameter changes applied. The code is executed immediately: it builds the STL, exports to refinement/result.stl, and updates working.stl which the 3D viewer auto-reloads.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -199,6 +251,10 @@ REFINEMENT_TOOLS = [
             "required": ["code"]
         }
     },
+    OPEN_VIEWER_TOOL,
+    READ_FILE_TOOL,
+    LIST_FILES_TOOL,
+    SCREENSHOT_VIEWER_TOOL,
 ]
 
 PHASE_TOOLS = {
@@ -274,6 +330,60 @@ print(f"DIMS:{{bb.xlen:.2f}}x{{bb.ylen:.2f}}x{{bb.zlen:.2f}}")
         if building_flag and os.path.exists(building_flag):
             os.remove(building_flag)
 
+# ── Viewer screenshot ──
+
+def capture_viewer_screenshot(session_dir):
+    """Capture the f3d window via hyprctl + grim and return as MCP image content."""
+    import subprocess
+    import base64
+    import tempfile
+
+    # Find f3d window geometry via Hyprland IPC
+    try:
+        result = subprocess.run(
+            ["hyprctl", "clients", "-j"],
+            capture_output=True, text=True, timeout=3
+        )
+        if result.returncode != 0:
+            return [{"type": "text", "text": "Cannot query windows (hyprctl failed)."}]
+
+        clients = json.loads(result.stdout)
+        f3d_window = None
+        for client in clients:
+            if "f3d" in client.get("class", "").lower() or "f3d" in client.get("title", "").lower():
+                f3d_window = client
+                break
+
+        if not f3d_window:
+            return [{"type": "text", "text": "f3d window not found. Open the viewer first with open_viewer."}]
+
+        x, y = f3d_window["at"]
+        w, h = f3d_window["size"]
+
+        if w <= 0 or h <= 0:
+            return [{"type": "text", "text": "f3d window has zero size (minimized?)."}]
+
+        # Capture with grim
+        screenshot_path = tempfile.mktemp(suffix=".png")
+        result = subprocess.run(
+            ["grim", "-g", f"{x},{y} {w}x{h}", screenshot_path],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            return [{"type": "text", "text": f"Screenshot failed: {result.stderr.strip()}"}]
+
+        with open(screenshot_path, "rb") as f:
+            data = base64.standard_b64encode(f.read()).decode("ascii")
+
+        os.unlink(screenshot_path)
+
+        return [{"type": "image", "data": data, "mimeType": "image/png"}]
+
+    except FileNotFoundError:
+        return [{"type": "text", "text": "grim or hyprctl not found. Install grim for Wayland screenshots."}]
+    except Exception as e:
+        return [{"type": "text", "text": f"Screenshot error: {e}"}]
+
 # ── Tool call handlers ──
 
 def handle_tool_call(name, arguments, session_dir):
@@ -316,7 +426,7 @@ def handle_tool_call(name, arguments, session_dir):
         output_dir = os.path.join(session_dir, "components", component_id) if session_dir else "/tmp/mimodel_build"
         result = run_cadquery_build(code, output_dir, session_root=session_dir, label=component_id)
         if result["success"]:
-            return [{"type": "text", "text": f"Build successful! Dimensions: {result['dimensions']}mm. Model displayed in 3D viewer. Call request_approval when ready."}]
+            return [{"type": "text", "text": f"Build successful! Dimensions: {result['dimensions']}mm. STL written to {result['stl_path']} and working.stl updated — viewer will auto-reload. Call request_approval when ready."}]
         else:
             return [{"type": "text", "text": f"Build failed:\n{result['error']}\n\nFix the code and try again."}]
 
@@ -325,7 +435,7 @@ def handle_tool_call(name, arguments, session_dir):
         output_dir = os.path.join(session_dir, "assembly") if session_dir else "/tmp/mimodel_build"
         result = run_cadquery_build(code, output_dir, session_root=session_dir, label="assembly")
         if result["success"]:
-            return [{"type": "text", "text": f"Assembly built! Dimensions: {result['dimensions']}mm. Model displayed in viewer."}]
+            return [{"type": "text", "text": f"Assembly built! Dimensions: {result['dimensions']}mm. STL written to {result['stl_path']} and working.stl updated — viewer will auto-reload."}]
         else:
             return [{"type": "text", "text": f"Assembly build failed:\n{result['error']}"}]
 
@@ -334,7 +444,7 @@ def handle_tool_call(name, arguments, session_dir):
         output_dir = os.path.join(session_dir, "refinement") if session_dir else "/tmp/mimodel_build"
         result = run_cadquery_build(code, output_dir, session_root=session_dir, label="refinement")
         if result["success"]:
-            return [{"type": "text", "text": f"Refinement built! Dimensions: {result['dimensions']}mm."}]
+            return [{"type": "text", "text": f"Refinement built! Dimensions: {result['dimensions']}mm. STL written to {result['stl_path']} and working.stl updated — viewer will auto-reload."}]
         else:
             return [{"type": "text", "text": f"Refinement build failed:\n{result['error']}"}]
 
@@ -347,6 +457,73 @@ def handle_tool_call(name, arguments, session_dir):
         old = arguments.get("old_value", "")
         new = arguments.get("new_value", "")
         return [{"type": "text", "text": f"Parameter updated: {pname} changed from {old} to {new}"}]
+
+    if name == "screenshot_viewer":
+        return capture_viewer_screenshot(session_dir)
+
+    if name == "open_viewer":
+        if session_dir:
+            working_stl = os.path.join(session_dir, "working.stl")
+            if os.path.exists(working_stl):
+                signal = os.path.join(session_dir, ".open_viewer")
+                open(signal, "w").close()
+                return [{"type": "text", "text": "Opening model in 3D viewer."}]
+            else:
+                return [{"type": "text", "text": "No model built yet. Submit code first."}]
+        return [{"type": "text", "text": "No session directory — cannot open viewer."}]
+
+    if name == "read_file":
+        rel_path = arguments.get("path", "")
+        if not session_dir:
+            return [{"type": "text", "text": "No session directory set."}]
+        # Resolve and validate path stays within session dir
+        full_path = os.path.normpath(os.path.join(session_dir, rel_path))
+        if not full_path.startswith(os.path.normpath(session_dir)):
+            return [{"type": "text", "text": "Path must be within the session directory."}]
+        if not os.path.exists(full_path):
+            return [{"type": "text", "text": f"File not found: {rel_path}"}]
+        if not os.path.isfile(full_path):
+            return [{"type": "text", "text": f"Not a file: {rel_path}. Use list_files to browse directories."}]
+        # Reject binary files
+        ext = os.path.splitext(full_path)[1].lower()
+        if ext in (".stl", ".step", ".stp", ".png", ".jpg", ".jpeg", ".pdf"):
+            return [{"type": "text", "text": f"Cannot read binary file ({ext}). For STL metadata, read {rel_path}.json if it exists."}]
+        try:
+            with open(full_path, "r") as f:
+                content = f.read(100_000)  # 100KB limit
+            return [{"type": "text", "text": content}]
+        except Exception as e:
+            return [{"type": "text", "text": f"Error reading file: {e}"}]
+
+    if name == "list_files":
+        rel_path = arguments.get("path", ".")
+        if not session_dir:
+            return [{"type": "text", "text": "No session directory set."}]
+        full_path = os.path.normpath(os.path.join(session_dir, rel_path))
+        if not full_path.startswith(os.path.normpath(session_dir)):
+            return [{"type": "text", "text": "Path must be within the session directory."}]
+        if not os.path.isdir(full_path):
+            return [{"type": "text", "text": f"Not a directory: {rel_path}"}]
+        try:
+            lines = []
+            for root, dirs, files in os.walk(full_path):
+                # Skip hidden dirs
+                dirs[:] = [d for d in sorted(dirs) if not d.startswith('.')]
+                rel_root = os.path.relpath(root, session_dir)
+                if rel_root == ".":
+                    rel_root = ""
+                for fname in sorted(files):
+                    if fname.startswith('.') or fname == "session.json":
+                        continue
+                    fpath = os.path.join(root, fname)
+                    size = os.path.getsize(fpath)
+                    display_path = os.path.join(rel_root, fname) if rel_root else fname
+                    lines.append(f"  {display_path} ({size:,} bytes)")
+            if not lines:
+                return [{"type": "text", "text": "Directory is empty."}]
+            return [{"type": "text", "text": "\n".join(lines)}]
+        except Exception as e:
+            return [{"type": "text", "text": f"Error listing files: {e}"}]
 
     return [{"type": "text", "text": f"Unknown tool: {name}"}]
 

@@ -390,12 +390,14 @@ impl<'a> App<'a> {
                                     FileAction::OpenViewer(p) => {
                                         if let Err(e) = self.viewer.update_working_stl(&p) {
                                             self.conversation.add("system", &format!("Viewer error: {e}"));
-                                        } else {
-                                            if !self.viewer.is_running() {
-                                                let _ = self.viewer.show();
+                                        } else if !self.viewer.is_running() {
+                                            match self.viewer.show() {
+                                                Ok(true) => self.conversation.add("system", &format!("Opened in viewer: {}", p.file_name().unwrap_or_default().to_string_lossy())),
+                                                Ok(false) => {} // already running
+                                                Err(e) => self.conversation.add("system", &format!("Viewer: {e}")),
                                             }
-                                            self.conversation.add("system", &format!("Opened in viewer: {}", p.file_name().unwrap_or_default().to_string_lossy()));
                                         }
+                                        // If viewer already running, f3d --watch picks up the change silently
                                     }
                                     FileAction::LoadText(p) => {
                                         match std::fs::read_to_string(&p) {
