@@ -15,6 +15,7 @@ output.stl
 
 # Superpowers brainstorm sessions
 .superpowers/
+docs/superpowers/
 
 # Pytest
 .pytest_cache/

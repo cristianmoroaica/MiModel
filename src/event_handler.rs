@@ -197,10 +197,10 @@ impl<'a> App<'a> {
                 return;
             }
             (Tab, _) => {
-                // Try auto-complete if focused on Input with /ref or /import
+                // Auto-complete if focused on Input and typing a command
                 if self.focus == Focus::Input {
                     let current = self.input_bar.text();
-                    if current.starts_with("/ref ") || current.starts_with("/import ") {
+                    if current.starts_with("/ref") || current.starts_with("/import") {
                         self.try_autocomplete();
                         return;
                     }
@@ -469,50 +469,59 @@ impl<'a> App<'a> {
     fn try_autocomplete(&mut self) {
         let current = self.input_bar.text();
 
-        if let Some(query) = current.strip_prefix("/ref ") {
-            // Complete from reference library
+        // Handle /ref — with or without trailing space/query
+        if current.starts_with("/ref") {
+            let query = current.strip_prefix("/ref").unwrap_or("").trim_start();
             let query_lower = query.to_lowercase();
             let library = reference::load_library().unwrap_or_default();
+
+            if library.is_empty() {
+                self.conversation.add("system", "Reference library is empty. Use /ref <name> to research a component.");
+                return;
+            }
+
+            // Match against both names and slugs
             let mut matches: Vec<String> = library.iter()
+                .filter(|(comp, slug)| {
+                    if query_lower.is_empty() { return true; }
+                    comp.identity.name.to_lowercase().contains(&query_lower)
+                        || slug.to_lowercase().contains(&query_lower)
+                })
                 .map(|(comp, _slug)| comp.identity.name.clone())
-                .filter(|name| name.to_lowercase().contains(&query_lower))
                 .collect();
             matches.sort();
             matches.dedup();
 
             if matches.len() == 1 {
-                // Single match — complete it
                 self.input_bar.set_content(&format!("/ref {}", matches[0]));
             } else if !matches.is_empty() {
-                // Multiple matches — show them
-                let list = matches.iter().take(10)
+                let list = matches.iter().take(15)
                     .map(|m| format!("  {m}"))
                     .collect::<Vec<_>>()
                     .join("\n");
-                self.conversation.add("system", &format!("Matches:\n{list}"));
-            } else {
-                // Also try matching slugs
-                let slug_matches: Vec<&str> = library.iter()
-                    .map(|(_, slug)| slug.as_str())
-                    .filter(|s| s.contains(&query_lower))
-                    .collect();
-                if slug_matches.len() == 1 {
-                    self.input_bar.set_content(&format!("/ref {}", slug_matches[0]));
-                } else if !slug_matches.is_empty() {
-                    let list = slug_matches.iter().take(10)
-                        .map(|m| format!("  {m}"))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    self.conversation.add("system", &format!("Matches:\n{list}"));
+                self.conversation.add("system", &format!("References:\n{list}"));
+                // Add space if user typed just "/ref"
+                if !current.contains(' ') {
+                    self.input_bar.set_content("/ref ");
                 }
             }
-        } else if let Some(partial) = current.strip_prefix("/import ") {
-            // Filesystem path completion for .step/.stp files
+            return;
+        }
+
+        // Handle /import — with or without trailing space/path
+        if current.starts_with("/import") {
+            let raw = current.strip_prefix("/import").unwrap_or("");
+            let partial = raw.trim_start();
             let partial = if partial.starts_with("~/") {
                 dirs::home_dir()
                     .map(|h| h.join(&partial[2..]).to_string_lossy().to_string())
                     .unwrap_or_else(|| partial.to_string())
             } else if partial.is_empty() {
+                // No path yet — start from home and add space to input
+                if !current.contains(' ') {
+                    self.input_bar.set_content("/import ~/");
+                    return;
+                }
                 dirs::home_dir()
                     .map(|h| h.to_string_lossy().to_string())
                     .unwrap_or_else(|| "/".to_string())
