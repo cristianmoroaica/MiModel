@@ -79,25 +79,25 @@ impl PhaseSession {
         self.base_dir.join("assembly")
     }
 
-    /// Atomic copy: write to working.stl.tmp then rename to working.stl.
+    /// Atomic copy: write to _buffer.stl.tmp then rename to _buffer.stl.
     pub fn update_working_stl(&self, src: &Path) -> Result<(), String> {
-        let tmp = self.base_dir.join("working.stl.tmp");
-        let dest = self.base_dir.join("working.stl");
+        let tmp = self.base_dir.join("_buffer.stl.tmp");
+        let dest = self.base_dir.join("_buffer.stl");
         fs::copy(src, &tmp)
             .map_err(|e| format!("Failed to copy STL to tmp: {e}"))?;
         fs::rename(&tmp, &dest)
-            .map_err(|e| format!("Failed to rename working.stl.tmp: {e}"))?;
+            .map_err(|e| format!("Failed to rename _buffer.stl.tmp: {e}"))?;
         Ok(())
     }
 
-    /// Atomic copy: write to working.step.tmp then rename to working.step.
+    /// Atomic copy: write to _buffer.step.tmp then rename to _buffer.step.
     pub fn update_working_step(&self, src: &Path) -> Result<(), String> {
-        let tmp = self.base_dir.join("working.step.tmp");
-        let dest = self.base_dir.join("working.step");
+        let tmp = self.base_dir.join("_buffer.step.tmp");
+        let dest = self.base_dir.join("_buffer.step");
         fs::copy(src, &tmp)
             .map_err(|e| format!("Failed to copy STEP to tmp: {e}"))?;
         fs::rename(&tmp, &dest)
-            .map_err(|e| format!("Failed to rename working.step.tmp: {e}"))?;
+            .map_err(|e| format!("Failed to rename _buffer.step.tmp: {e}"))?;
         Ok(())
     }
 
@@ -250,8 +250,8 @@ mod tests {
         let src = tmp.path().join("test.stl");
         std::fs::write(&src, b"dummy stl").unwrap();
         session.update_working_stl(&src).unwrap();
-        assert!(tmp.path().join("sess/working.stl").exists());
-        assert_eq!(std::fs::read(tmp.path().join("sess/working.stl")).unwrap(), b"dummy stl");
+        assert!(tmp.path().join("sess/_buffer.stl").exists());
+        assert_eq!(std::fs::read(tmp.path().join("sess/_buffer.stl")).unwrap(), b"dummy stl");
     }
 
     #[test]
@@ -265,8 +265,8 @@ mod tests {
         let src = tmp.path().join("test.step");
         std::fs::write(&src, b"dummy step").unwrap();
         session.update_working_step(&src).unwrap();
-        assert!(tmp.path().join("sess/working.step").exists());
-        assert_eq!(std::fs::read(tmp.path().join("sess/working.step")).unwrap(), b"dummy step");
+        assert!(tmp.path().join("sess/_buffer.step").exists());
+        assert_eq!(std::fs::read(tmp.path().join("sess/_buffer.step")).unwrap(), b"dummy step");
     }
 
     #[test]

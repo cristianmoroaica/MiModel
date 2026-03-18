@@ -1058,7 +1058,7 @@ impl<'a> App<'a> {
                 );
                 self.right_panel.set_model(&model_summary);
 
-                // Update working.stl so f3d auto-reloads
+                // Update _buffer.stl so f3d auto-reloads
                 if let Some(ref src) = stl_path {
                     if let Err(e) = self.viewer.update_working_stl(src) {
                         self.conversation.add("system", &format!("Warning: {e}"));
@@ -1118,8 +1118,8 @@ impl<'a> App<'a> {
                     // Point viewer at session directory so f3d watches the right file
                     self.viewer.set_working_dir(&session_dir);
 
-                    // Launch viewer if working.stl exists
-                    let working_stl = session_dir.join("working.stl");
+                    // Launch viewer if _buffer.stl exists
+                    let working_stl = session_dir.join("_buffer.stl");
                     if working_stl.exists() && !self.viewer.is_running() {
                         let _ = self.viewer.show();
                     }
@@ -1341,13 +1341,20 @@ impl<'a> App<'a> {
                             lines.join("\n")));
                 }
             }
-            "submit_cadquery_code" | "submit_assembly_code" | "submit_code_patch" => {
-                // Build happened in MCP server — working.stl already written to session dir.
-                // Viewer's working_dir points there, so just launch if not running.
-                if !self.viewer.is_running() {
-                    let _ = self.viewer.show();
+            "write_file" => {
+                // Auto-build writes _buffer.stl when a .py is saved to a build dir.
+                // Launch viewer if not running and a buffer exists.
+                if let Some(ref dir) = self.session.active_dir {
+                    if dir.join("_buffer.stl").exists() && !self.viewer.is_running() {
+                        let _ = self.viewer.show();
+                    }
                 }
-                self.right_panel.set_model("Build complete -- check 3D viewer");
+                // Check if this was a build (path ends with .py in a build dir)
+                if let Some(path) = tool.input.get("path").and_then(|v| v.as_str()) {
+                    if path.ends_with(".py") && (path.starts_with("components/") || path.starts_with("assembly/") || path.starts_with("refinement/")) {
+                        self.right_panel.set_model("Build complete -- check 3D viewer");
+                    }
+                }
             }
             "request_approval" => {
                 if let Some(summary) = tool.input.get("summary").and_then(|v| v.as_str()) {
@@ -1604,7 +1611,7 @@ fn run_event_loop(
             let signal = dir.join(".open_viewer");
             if signal.exists() {
                 let _ = std::fs::remove_file(&signal);
-                let working_stl = dir.join("working.stl");
+                let working_stl = dir.join("_buffer.stl");
                 if working_stl.exists() {
                     let _ = app.viewer.update_working_stl(&working_stl);
                     if !app.viewer.is_running() {

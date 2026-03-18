@@ -1,64 +1,65 @@
 # MiModel
 
-An interactive terminal UI for generating functional 3D models from natural language. Describe what you need, Claude generates CadQuery code, and you get a printable STL.
+An interactive terminal UI for generating functional 3D models from natural language. Describe what you need, Claude orchestrates a multi-phase pipeline through MCP tools, and you get a printable STL with live 3D preview.
 
 Built for resin 3D printing workflows where you want to go from idea to STL without opening a CAD program.
 
 ```
-┌─ Projects ────────┬─ Conversation ──────────────────────┬─ Model ──────────┐
-│                   │                                     │                  │
-│ ▼ Train Station   │  you:                               │ 92.0 x 62.0 x 6 │
-│   ├─ enclosure    │  a mounting bracket for RPi 4       │                  │
-│   ├─ servo mount  │  with 4 screw holes                 │ Features:        │
-│   └─ arduino ◀    │                                     │  4x M2.5 holes   │
-│                   │  claude:                            │  4x standoffs    │
-│ ▶ Drone Parts     │  I'll create a mounting bracket...  │  fillet 2mm      │
-│                   │                                     │                  │
-│ + New Project     │  Built successfully                  │ Preview:         │
-│                   │  92.0 x 62.0 x 6.5 mm               │  ⣀⣠⣤⣤⣤⣤⣄⣀      │
-│                   │  - 4x M2.5 holes                    │  ⣿⣿⣿○⣿○⣿⣿⣿     │
-│                   │  - 4x standoffs                     │  ⠈⠙⠛⠛⠛⠛⠋⠁      │
-│                   │                                     │                  │
-│                   │  you:                               │ Iterations: 2    │
-│                   │  add rounded corners, 3mm           │ Engine: cadquery │
-│                   │                                     │ Watertight: yes  │
-├───────────────────┴─────────────────────────────────────┴──────────────────┤
-│ Input  add ventilation slots on the top face                              │
-├───────────────────────────────────────────────────────────────────────────┤
-│ Enter Send  \+Enter Newline  Tab Switch  Ctrl+W Save part  q Quit        │
-└───────────────────────────────────────────────────────────────────────────┘
+┌─ Projects ────────┬─ Conversation ──────────────────────┬─ Spec/Refs/Model ─┐
+│                   │                                     │                   │
+│ ▼ NEMA23 mount    │  you:                               │ [dimension]       │
+│   • session_1 ◀   │  a clamp mount for a NEMA 23        │  motor_pocket =   │
+│     ├ components/ │  stepper motor                      │  57.75mm          │
+│     │ └ body/    │                                     │                   │
+│     │   » code.py│  claude:                            │ [feature]         │
+│     │   ◆ result │  The mount is ready for review.     │  clamping_slot    │
+│     ◇ working.stp│  Key dimensions:                    │  mounting_holes   │
+│     ◆ _buffer.stl│  • 70 x 90 x 73mm                  │                   │
+│                   │  • 57.75mm motor pocket             │ [constraint]      │
+│ ▶ Drone Parts     │                                     │  wall_min = 4mm   │
+│                   │  > Opened in viewer                 │                   │
+│ + New Project     │                                     │                   │
+├───────────────────┴─────────────────────────────────────┴───────────────────┤
+│ Input  Describe what you want to build...                                  │
+├────────────────────────────────────────────────────────────────────────────┤
+│ Spec ● ● ○ ○ ○  Enter Send  PgUp/Dn Scroll  Tab Panes  ^C Quit           │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## How It Works
 
-1. You describe a part in plain English
-2. Claude generates [CadQuery](https://cadquery.readthedocs.io/) Python code
-3. The code is executed to produce an STL file
-4. [f3d](https://f3d.app/) opens automatically and live-reloads on each iteration
-5. You refine by typing more instructions
+MiModel uses a **5-phase pipeline**, each with dedicated MCP tools that constrain Claude to the right task:
 
-The conversation is persistent. Close the app, come back tomorrow, pick up where you left off.
+1. **Spec** — Describe your part. Claude asks clarifying questions and records dimensions, constraints, and features.
+2. **Decompose** — Claude proposes a component tree (base shape + boolean cuts/unions). You approve or adjust.
+3. **Component** — Claude generates CadQuery code for each component, builds the STL, screenshots the viewer to self-verify, and iterates up to 5 times before asking for approval.
+4. **Assembly** — Claude combines approved components with boolean ops and transforms.
+5. **Refinement** — Adjust parameters, add features, or modify geometry with guided feedback.
+
+Each phase exposes only its own MCP tools — Claude cannot skip ahead or use tools from another phase.
 
 ## Features
 
-- **Three-column TUI** - Projects, conversation, and model info side by side
-- **Natural language to STL** - Describe dimensions, features, holes, fillets in plain English
-- **Live 3D preview** - f3d opens once, auto-reloads on each build via `--watch`
-- **Terminal preview** - Braille character wireframe right in the TUI
-- **Project organization** - Group sessions into projects at `~/MiModel/`
-- **Full history** - Every iteration saved: code, STL, metadata, conversation
-- **Image input** - Paste from clipboard (`Ctrl+V`) or reference file paths
-- **CadQuery + OpenSCAD** - CadQuery by default, OpenSCAD when CSG is more natural
-- **Session resume** - Claude remembers the conversation context across restarts
-- **Save parts** - `Ctrl+W` saves the current model as a named `.stl` + `.py`
+- **Phase-gated MCP tools** — Each phase exposes only relevant tools; Claude can't skip steps
+- **Self-verifying builds** — Claude screenshots the f3d viewer after each build to check geometry visually, iterating up to 5 times before asking for approval
+- **Live 3D preview** — f3d opens once with `--watch`, auto-reloads on every build
+- **File introspection** — Claude can read its own generated code, list session files, and review previous iterations
+- **Three-column TUI** — Project tree, conversation, and tabbed info panel (spec/refs/model)
+- **Natural language to STL** — Dimensions, holes, fillets, chamfers in plain English
+- **Image input** — Paste from clipboard (`Ctrl+V`), drag-drop, or reference file paths
+- **Component references** — `/ref nema23` researches real-world specs (thread pitch, clearance holes)
+- **Project organization** — Sessions grouped into projects at `~/MiModel/`
+- **Session resume** — Claude conversation context persists across restarts
+- **Usage monitoring** — API usage stats (5h/7d limits) shown in the status bar
 
 ## Requirements
 
 - **Rust** (1.70+)
 - **Python 3.11** with CadQuery (see [Python Setup](#python-setup))
-- **Claude CLI** (`claude`) - [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- **f3d** (optional, recommended) - `pacman -S f3d` / `brew install f3d`
-- **wl-clipboard** (optional, for image paste on Wayland) - `pacman -S wl-clipboard`
+- **Claude CLI** (`claude`) — [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+- **f3d** (recommended) — `pacman -S f3d` / `brew install f3d`
+- **grim + hyprctl** (for visual self-verification on Wayland/Hyprland)
+- **wl-clipboard** (optional, for image paste on Wayland) — `pacman -S wl-clipboard`
 
 ## Installation
 
@@ -100,16 +101,6 @@ python -m ai3d_cad --version
 # ai3d-cad 0.1.0 (protocol 1)
 ```
 
-Alternatively, use conda/mamba:
-
-```bash
-mamba create -n mimodel python=3.11
-mamba activate mimodel
-mamba install -c cadquery cadquery
-pip install trimesh numpy
-cd python && pip install -e . && cd ..
-```
-
 MiModel auto-detects the `.venv-cadquery` directory. You can also set the Python path explicitly:
 
 ```bash
@@ -124,7 +115,7 @@ Make sure `claude` is installed and authenticated:
 claude --version
 ```
 
-MiModel spawns `claude` with `--dangerously-skip-permissions` for non-interactive use. It strips `ANTHROPIC_API_KEY` from the environment so Claude uses its own OAuth auth.
+MiModel spawns `claude` with `--dangerously-skip-permissions` and `--strict-mcp-config` for non-interactive use.
 
 ## Usage
 
@@ -132,19 +123,22 @@ MiModel spawns `claude` with `--dangerously-skip-permissions` for non-interactiv
 mimodel
 ```
 
-Type what you want to build and press Enter:
+Create or select a project, then start describing your part:
 
 ```
-> a 20x15mm mounting bracket with 4 M3 screw holes and rounded corners
+> a NEMA 23 clamp mount for a CNC router
 ```
 
-Claude generates the CadQuery code, builds the STL, and f3d opens with the result. Keep refining:
+Claude walks through the phases automatically — spec, decompose, component builds, assembly.
 
-```
-> make it 3mm thick instead of 2
-> add a 10mm standoff on each corner
-> chamfer the bottom edges 1mm
-```
+### Phase commands
+
+| Command | Action |
+|---------|--------|
+| `advance` | Move to the next phase (after requirements met) |
+| `approve` | Approve the current component or tree |
+| `undo` | Revert to the previous iteration |
+| `/ref nema23` | Research component specs from datasheets |
 
 ### Multi-line input
 
@@ -158,14 +152,7 @@ End a line with `\` to continue on the next line:
 
 ### Image input
 
-Paste an image from the clipboard:
-
-```
-Ctrl+V
-> make a holder that fits this component
-```
-
-Or reference an image file directly:
+Paste from clipboard with `Ctrl+V`, or reference a file path:
 
 ```
 > design a mount based on ~/photos/sketch.png
@@ -184,21 +171,19 @@ Or reference an image file directly:
 | `Ctrl+W` | Save current model as a named part |
 | `Ctrl+V` | Paste image from clipboard |
 | `Ctrl+O` | Open/focus f3d viewer |
-| `Ctrl+Z` | Undo last iteration |
 | `Ctrl+N` | New session |
 | `Ctrl+P` | New project |
-| `Ctrl+S` | Export STL |
 | `Ctrl+L` | Toggle project sidebar |
 | `Ctrl+R` | Toggle model panel |
-| `Ctrl+C` | Cancel in-flight request |
-| `q` | Quit (when input is empty) |
+| `Ctrl+C` | Cancel in-flight request (double-tap to quit) |
 
 ### Projects pane
 
 | Key | Action |
 |-----|--------|
 | `j` / `k` | Navigate up/down |
-| `Enter` | Open session / expand project |
+| `l` / `h` | Expand / collapse |
+| `Enter` | Open session / activate file |
 | `e` | Rename selected item |
 | `d` | Delete (prompts for confirmation) |
 | `Tab` | Switch to Conversation pane |
@@ -208,44 +193,97 @@ Or reference an image file directly:
 | Key | Action |
 |-----|--------|
 | `j` / `k` | Scroll up/down |
-| `PgUp` / `PgDn` | Page scroll |
+| `u` / `d` | Page scroll |
 | `Tab` | Switch to Input |
 
-## Project Structure
+### Right panel
 
-All projects are saved to `~/MiModel/`:
+| Key | Action |
+|-----|--------|
+| `h` / `l` | Switch tabs (Spec / Refs / Model) |
+| `j` / `k` | Scroll content |
+| `Tab` | Switch to Input |
+
+## Session Structure
+
+All projects live under `~/MiModel/`:
 
 ```
 ~/MiModel/
-├── Train Station/
+├── NEMA23 mount/
 │   ├── project.json
-│   ├── bracket.stl              # Saved part (Ctrl+W)
-│   ├── bracket.py               # CadQuery source for saved part
-│   ├── enclosure/
-│   │   ├── session.json          # Conversation + metadata
-│   │   ├── iter_001.py           # CadQuery code, iteration 1
-│   │   ├── iter_001.stl          # Built STL
-│   │   ├── iter_001.json         # Dimensions, features
-│   │   ├── iter_002.py           # Iteration 2 (refinement)
-│   │   ├── iter_002.stl
-│   │   ├── iter_002.json
-│   │   └── images/
-│   │       └── clipboard_123.png # Pasted reference image
-│   └── servo mount/
-│       ├── session.json
-│       └── ...
-└── Drone Parts/
-    ├── project.json
-    └── ...
+│   ├── clamp_mount.stl              # Saved part (Ctrl+W)
+│   ├── clamp_mount.py               # Source for saved part
+│   └── Lets_build_a_NEMA23_mount/
+│       ├── session.json             # Phase state, conversations, component states
+│       ├── spec.toml                # Recorded specifications
+│       ├── _buffer.stl              # Current model (f3d watches this)
+│       ├── _buffer.step             # STEP export
+│       ├── components/
+│       │   └── cradle_body/
+│       │       ├── code.py          # Approved CadQuery code
+│       │       ├── result.stl       # Built STL
+│       │       └── result.step      # STEP for assembly
+│       ├── assembly/
+│       │   ├── code.py
+│       │   ├── result.stl
+│       │   └── result.step
+│       ├── refinement/
+│       │   ├── code.py
+│       │   ├── result.stl
+│       │   └── result.step
+│       └── images/
+│           └── clipboard_123.png    # Pasted reference images
+└── references/                      # Shared component library
+    ├── m3_socket_head_cap_screw.toml
+    └── nema_23_stepper_motor.toml
 ```
 
-- **project.json** - Project name, creation date, description
-- **session.json** - Full conversation history, iteration count, Claude session ID
-- **iter_NNN.py** - CadQuery source code for each iteration
-- **iter_NNN.stl** - Built STL for each iteration
-- **iter_NNN.json** - Metadata: dimensions, volume, triangle count, features, watertight status
+## MCP Tools by Phase
 
-Everything is auto-saved after each successful build.
+### All build phases (Component, Assembly, Refinement)
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read text files from the session directory |
+| `list_files` | List session directory tree |
+| `open_viewer` | Open f3d on the current model |
+| `screenshot_viewer` | Capture the f3d window for visual verification |
+
+### Spec
+
+| Tool | Description |
+|------|-------------|
+| `ask_question` | Ask the user a clarifying question |
+| `record_spec_field` | Record a dimension, constraint, feature, or component ref |
+| `mark_spec_complete` | Signal spec is ready for decomposition |
+
+### Decompose
+
+| Tool | Description |
+|------|-------------|
+| `ask_clarification` | Clarify decomposition details |
+| `propose_component_tree` | Submit component tree for review |
+
+### Component
+
+| Tool | Description |
+|------|-------------|
+| `submit_cadquery_code` | Build a component — executes code, exports STL, updates viewer |
+| `request_approval` | Ask user to approve after visual self-verification |
+
+### Assembly
+
+| Tool | Description |
+|------|-------------|
+| `submit_assembly_code` | Build assembly — combines components with boolean ops |
+
+### Refinement
+
+| Tool | Description |
+|------|-------------|
+| `update_parameter` | Tweak a parameter value |
+| `submit_code_patch` | Submit modified code for rebuild |
 
 ## Configuration
 
@@ -264,84 +302,116 @@ max_retries = 3
 build_timeout = 60       # seconds before killing a hung build
 ```
 
-## System Prompt
-
-The CAD engineer prompt is at `prompts/system.md`. You can edit it to change Claude's behavior — for example, to add material-specific constraints or default dimensions.
-
 ## Architecture
 
 ```
 src/
-├── main.rs              # TUI app, event loop, keybindings, background threading
+├── main.rs              # TUI app, event loop, render, App struct
+├── event_handler.rs     # Key, mouse, paste event dispatch
+├── phase_dispatch.rs    # Phase-aware prompt routing
+├── claude_bridge.rs     # Background Claude CLI orchestration, MCP config generation
+├── claude.rs            # Claude CLI subprocess (--resume, --mcp-config, streaming)
 ├── tui/
 │   ├── layout.rs        # Three-column responsive layout
-│   ├── input_bar.rs     # Text input with history
-│   ├── conversation.rs  # Scrollable styled messages
-│   ├── project_tree.rs  # Collapsible project/session tree
-│   └── model_panel.rs   # Dimensions, features, braille preview
+│   ├── input_bar.rs     # Text input with tui-textarea
+│   ├── conversation.rs  # Scrollable markdown-styled messages
+│   ├── project_tree.rs  # Collapsible project/session/file tree
+│   ├── right_panel.rs   # Tabbed panel (Spec / Refs / Model)
+│   ├── component_list.rs# Component status badges
+│   ├── component_tree.rs# Dependency tree visualization
+│   └── status_bar.rs    # Usage stats overlay
 ├── storage/
 │   ├── project.rs       # Project CRUD (~/MiModel/)
-│   └── session.rs       # Session serialization
-├── model_session.rs     # Runtime build state, undo, save/load
-├── claude.rs            # Claude CLI subprocess (--resume for sessions)
-├── python.rs            # ai3d-cad subprocess (CadQuery execution)
-├── parser.rs            # Extract code blocks from Claude responses
-├── preview.rs           # Braille character 3D wireframe
+│   └── session.rs       # PhaseSessionData serialization
+├── phase.rs             # Phase enum (Spec→Decompose→Component→Assembly→Refinement)
+├── model_session.rs     # PhaseSession runtime state
+├── session_manager.rs   # Active session tracking, build dispatch
+├── viewer.rs            # f3d launcher with --watch, atomic file updates
+├── usage.rs             # Claude API usage monitoring (OAuth)
+├── render.rs            # Phase indicator, legend bar
+├── parser.rs            # Code block extraction from responses
+├── spec.rs              # ModelSpec TOML serialization
+├── reference.rs         # Component reference library (~/MiModel/references/)
+├── reference_detect.rs  # Auto-detect /ref markers in conversation
+├── image.rs             # Clipboard paste, file path detection
+├── python.rs            # ai3d-cad subprocess runner
+├── preview.rs           # Braille 3D wireframe
 ├── stl.rs               # Binary STL reader
-├── image.rs             # Clipboard paste, image path detection
-├── viewer.rs            # f3d launcher with --watch
 └── config.rs            # TOML config loading
 
+mcp/
+└── server.py            # MCP server — phase-gated tools, CadQuery build execution,
+                         #   file I/O, viewer screenshots (hyprctl + grim)
+
 python/src/ai3d_cad/
-├── builder.py           # CadQuery code execution + STL export
-├── analyzer.py          # Mesh analysis (dimensions, watertight)
-└── openscad.py          # OpenSCAD fallback engine
+├── builder.py           # CadQuery code execution + STL/STEP export
+├── assembler.py         # Assembly operations
+└── __main__.py          # CLI interface
+
+prompts/
+├── spec.md              # Spec phase system prompt
+├── decompose.md         # Decompose phase system prompt
+├── component.md         # Component phase — build + screenshot + verify loop
+├── assembly.md          # Assembly phase system prompt
+└── refinement.md        # Refinement phase system prompt
 ```
 
-The Rust binary handles the TUI, Claude orchestration, and session management. Python handles CadQuery code execution (via subprocess). They communicate through temp files and JSON on stdout.
-
-## How the AI Pipeline Works
+## How the Pipeline Works
 
 ```
 User prompt
     │
     ▼
-Claude CLI (--system-prompt prompts/system.md)
+Rust TUI generates MCP config (phase + session dir)
     │
     ▼
-Response with ```cadquery code block
+Claude CLI spawned with --mcp-config --strict-mcp-config
     │
     ▼
-Parser extracts code
+Claude sees ONLY tools for current phase
     │
     ▼
-Python subprocess: ai3d-cad build --engine cadquery
+Tool calls flow through MCP server (mcp/server.py)
+    │
+    ├─ submit_cadquery_code ──► CadQuery subprocess ──► STL + STEP
+    │                               │
+    │                               ▼
+    │                       _buffer.stl updated (atomic rename)
+    │                               │
+    │                               ▼
+    │                       f3d auto-reloads via --watch
+    │
+    ├─ screenshot_viewer ──► hyprctl finds f3d window ──► grim captures PNG
+    │                               │
+    │                               ▼
+    │                       Base64 image returned to Claude for inspection
+    │
+    ├─ read_file / list_files ──► Session directory I/O
+    │
+    └─ ask_clarification ──► Forwarded to user via TUI conversation
     │
     ▼
-CadQuery executes code → STL + metadata JSON
+Rust TUI intercepts tool_use blocks from Claude's stream
     │
     ▼
-working.stl updated → f3d auto-reloads
+Updates conversation, spec panel, component list, viewer state
     │
     ▼
-Model panel shows dimensions, features, preview
-    │
-    ▼
-Auto-save to ~/MiModel/<project>/<session>/
+Phase advances on user command ("advance" / "approve")
 ```
 
-Claude maintains conversation context via `--resume <session_id>`, so each refinement builds on the previous code. If the session expires, MiModel falls back to a fresh session with the current code injected as context.
+Claude maintains conversation context via `--resume <session_id>`. If the session expires, MiModel falls back to a fresh session with the phase prompt re-injected.
 
 ## Responsive Layout
 
 The TUI adapts to terminal width:
 
-- **100+ columns** - Full three-column layout
-- **60-99 columns** - Sidebar hidden, conversation + model panel
-- **40-59 columns** - Only conversation + input
-- **Under 40** - "Terminal too narrow" message
+- **100+ columns** — Full three-column layout
+- **60-99 columns** — Sidebar hidden, conversation + right panel
+- **40-59 columns** — Only conversation + input
+- **Under 40** — "Terminal too narrow" message
 
-Toggle panels manually with `Ctrl+L` (sidebar) and `Ctrl+R` (model panel).
+Toggle panels manually with `Ctrl+L` (sidebar) and `Ctrl+R` (right panel).
 
 ## Running Tests
 
