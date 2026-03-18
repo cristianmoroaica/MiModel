@@ -79,7 +79,12 @@ LIST_FILES_TOOL = {
 
 SCREENSHOT_VIEWER_TOOL = {
     "name": "screenshot_viewer",
-    "description": "Capture a screenshot of the f3d 3D viewer window and return it as an image. Use this to visually verify your build results — check geometry, holes, chamfers, proportions, etc.",
+    "description": (
+        "Render a 360° isometric scan of the current model (6 views at 60° increments). "
+        "Returns 6 images showing the model from all angles. Use this after every build "
+        "to verify geometry — check holes, chamfers, proportions, missing features. "
+        "Runs headless (no window needed)."
+    ),
     "inputSchema": {
         "type": "object",
         "properties": {},
@@ -278,6 +283,79 @@ PHASE_TOOLS = {
 # ── Spec field accumulator ──
 
 spec_fields = []
+
+# ── Goal document generation ──
+
+def generate_goal_document(fields):
+    """Generate goal.md from recorded spec fields.
+    Organizes into functional checks (dimensions, components, constraints)
+    and visual requirements (features, surface finish)."""
+    dimensions = [f for f in fields if f["category"] == "dimension"]
+    constraints = [f for f in fields if f["category"] == "constraint"]
+    features = [f for f in fields if f["category"] == "feature"]
+    components = [f for f in fields if f["category"] == "component"]
+
+    lines = ["# Design Goal", ""]
+
+    # Components to accommodate
+    if components:
+        lines.append("## Components to Accommodate")
+        for c in components:
+            unit = f" {c['unit']}" if c["unit"] else ""
+            lines.append(f"- {c['key']}: {c['value']}{unit}")
+        lines.append("")
+
+    # Functional requirements — these are checked FIRST
+    lines.append("## Functional Requirements (verify FIRST)")
+    lines.append("These must be correct before any visual check.")
+    lines.append("")
+    if dimensions:
+        for d in dimensions:
+            unit = d["unit"] or "mm"
+            lines.append(f"- [ ] {d['key']}: {d['value']} {unit}")
+    if constraints:
+        for c in constraints:
+            unit = f" {c['unit']}" if c["unit"] else ""
+            lines.append(f"- [ ] {c['key']}: {c['value']}{unit}")
+    if not dimensions and not constraints:
+        lines.append("- (no dimensions/constraints recorded)")
+    lines.append("")
+
+    # Visual / feature requirements — checked SECOND
+    lines.append("## Visual & Feature Requirements (verify SECOND)")
+    lines.append("Check these after functional requirements pass.")
+    lines.append("")
+    if features:
+        for f in features:
+            unit = f" {f['unit']}" if f["unit"] else ""
+            lines.append(f"- [ ] {f['key']}: {f['value']}{unit}")
+    else:
+        lines.append("- (no specific visual requirements recorded)")
+    lines.append("")
+
+    # Verification protocol
+    lines.append("## Verification Protocol")
+    lines.append("After EVERY build, perform this check:")
+    lines.append("")
+    lines.append("### Step 1: Read build results")
+    lines.append("- Compare bounding box to expected overall dimensions")
+    lines.append("- Check topology (face/edge count) — does it match expected complexity?")
+    lines.append("- Verify cylindrical features match expected holes/bosses")
+    lines.append("")
+    lines.append("### Step 2: Functional scan (screenshot_viewer)")
+    lines.append("- Can each referenced component physically fit? (pocket sizes, clearances)")
+    lines.append("- Are all mounting/bolt holes present and correctly positioned?")
+    lines.append("- Do moving parts have clearance? (slots, channels)")
+    lines.append("- Are wall thicknesses adequate for the manufacturing method?")
+    lines.append("")
+    lines.append("### Step 3: Visual scan")
+    lines.append("- Does the overall shape match the user's description?")
+    lines.append("- Are chamfers, fillets, and surface features present?")
+    lines.append("- Are proportions correct (not too thin/thick)?")
+    lines.append("- Is the design clean and manufacturable?")
+    lines.append("")
+
+    return "\n".join(lines)
 
 # ── STEP import + analysis ──
 
@@ -486,12 +564,37 @@ def run_cadquery_build(code, output_dir, session_root=None, label="build"):
         # Build in subprocess to isolate crashes
         export_code = code + f"""
 
-# ── Auto-export ──
+# ── Auto-export + analysis ──
 import cadquery as cq
+from collections import Counter
 cq.exporters.export(result, "{stl_path}")
 cq.exporters.export(result, "{step_path}")
-bb = result.val().BoundingBox()
+solid = result.val()
+bb = solid.BoundingBox()
 print(f"DIMS:{{bb.xlen:.2f}}x{{bb.ylen:.2f}}x{{bb.zlen:.2f}}")
+# Topology for validation
+faces = result.faces().vals()
+edges = result.edges().vals()
+ft = Counter(f.geomType() for f in faces)
+ft_str = ", ".join(f"{{k}}:{{v}}" for k, v in sorted(ft.items()))
+print(f"TOPO:{{len(faces)}}f {{len(edges)}}e | {{ft_str}}")
+# Detect cylindrical features (holes/bosses)
+cyls = [f for f in faces if f.geomType() == "CYLINDER"]
+if cyls:
+    try:
+        from OCP.BRepAdaptor import BRepAdaptor_Surface
+        from OCP.GeomAbs import GeomAbs_Cylinder
+        radii = Counter()
+        for f in cyls:
+            a = BRepAdaptor_Surface(f.wrapped)
+            if a.GetType() == GeomAbs_Cylinder:
+                r = round(a.Cylinder().Radius(), 2)
+                radii[r] += 1
+        holes = " ".join(f"{{c}}x d{{r*2}}mm" for r, c in sorted(radii.items()))
+        if holes:
+            print(f"HOLES:{{holes}}")
+    except:
+        pass
 """
         proc = subprocess.run(
             [sys.executable, "-c", export_code],
@@ -503,9 +606,15 @@ print(f"DIMS:{{bb.xlen:.2f}}x{{bb.ylen:.2f}}x{{bb.zlen:.2f}}")
             return {"success": False, "error": error}
 
         dims = "unknown"
+        topo = ""
+        holes = ""
         for line in proc.stdout.splitlines():
             if line.startswith("DIMS:"):
                 dims = line[5:]
+            elif line.startswith("TOPO:"):
+                topo = line[5:]
+            elif line.startswith("HOLES:"):
+                holes = line[6:]
 
         # Copy to _buffer.stl/_buffer.step in session root
         if session_root:
@@ -513,7 +622,7 @@ print(f"DIMS:{{bb.xlen:.2f}}x{{bb.ylen:.2f}}x{{bb.zlen:.2f}}")
                 if os.path.exists(src):
                     shutil.copy2(src, os.path.join(session_root, name))
 
-        return {"success": True, "dimensions": dims, "stl_path": stl_path, "step_path": step_path}
+        return {"success": True, "dimensions": dims, "topology": topo, "holes": holes, "stl_path": stl_path, "step_path": step_path}
 
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "Build timed out after 60 seconds"}
@@ -523,59 +632,95 @@ print(f"DIMS:{{bb.xlen:.2f}}x{{bb.ylen:.2f}}x{{bb.zlen:.2f}}")
         if building_flag and os.path.exists(building_flag):
             os.remove(building_flag)
 
-# ── Viewer screenshot ──
+# ── Model scan (headless f3d rendering) ──
 
-def capture_viewer_screenshot(session_dir):
-    """Capture the f3d window via hyprctl + grim and return as MCP image content."""
+SCAN_ANGLES = [
+    (  0, 30, "front-right"),
+    ( 60, 30, "right"),
+    (120, 30, "back-right"),
+    (180, 30, "back-left"),
+    (240, 30, "left"),
+    (300, 30, "front-left"),
+]
+
+def scan_model(session_dir):
+    """Render 6 isometric views of the current model using headless f3d.
+    Returns MCP content blocks: one text label + 6 images."""
     import subprocess
     import base64
     import tempfile
+    import shutil
 
-    # Find f3d window geometry via Hyprland IPC
+    if not session_dir:
+        return [{"type": "text", "text": "No session directory set."}]
+
+    # Find the model to render
+    stl_path = os.path.join(session_dir, "_buffer.stl")
+    if not os.path.exists(stl_path):
+        return [{"type": "text", "text": "No model built yet. Write code first."}]
+
+    f3d_bin = shutil.which("f3d")
+    if not f3d_bin:
+        return [{"type": "text", "text": "f3d not found. Install f3d for model scanning."}]
+
+    tmp_dir = tempfile.mkdtemp(prefix="mimodel_scan_")
+    content = []
+    errors = []
+
     try:
-        result = subprocess.run(
-            ["hyprctl", "clients", "-j"],
-            capture_output=True, text=True, timeout=3
-        )
-        if result.returncode != 0:
-            return [{"type": "text", "text": "Cannot query windows (hyprctl failed)."}]
+        # Launch all 6 renders in parallel
+        procs = []
+        for az, el, label in SCAN_ANGLES:
+            out_path = os.path.join(tmp_dir, f"{label}.png")
+            proc = subprocess.Popen(
+                [f3d_bin,
+                 "--output", out_path,
+                 "--resolution", "400,300",
+                 "--camera-azimuth-angle", str(az),
+                 "--camera-elevation-angle", str(el),
+                 "--no-background",
+                 "--up", "+Z",
+                 "-g",
+                 stl_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            procs.append((proc, out_path, label))
 
-        clients = json.loads(result.stdout)
-        f3d_window = None
-        for client in clients:
-            if "f3d" in client.get("class", "").lower() or "f3d" in client.get("title", "").lower():
-                f3d_window = client
-                break
+        # Collect results
+        for proc, out_path, label in procs:
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                errors.append(f"{label}: timed out")
+                continue
 
-        if not f3d_window:
-            return [{"type": "text", "text": "f3d window not found. Open the viewer first with open_viewer."}]
+            if proc.returncode != 0:
+                errors.append(f"{label}: f3d error")
+                continue
 
-        x, y = f3d_window["at"]
-        w, h = f3d_window["size"]
+            if not os.path.exists(out_path):
+                errors.append(f"{label}: no output")
+                continue
 
-        if w <= 0 or h <= 0:
-            return [{"type": "text", "text": "f3d window has zero size (minimized?)."}]
+            with open(out_path, "rb") as f:
+                data = base64.standard_b64encode(f.read()).decode("ascii")
+            content.append({"type": "text", "text": f"View: {label} (azimuth {SCAN_ANGLES[len(content) // 2][0]}°)"})
+            content.append({"type": "image", "data": data, "mimeType": "image/png"})
 
-        # Capture with grim
-        screenshot_path = tempfile.mktemp(suffix=".png")
-        result = subprocess.run(
-            ["grim", "-g", f"{x},{y} {w}x{h}", screenshot_path],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode != 0:
-            return [{"type": "text", "text": f"Screenshot failed: {result.stderr.strip()}"}]
+        if not content:
+            return [{"type": "text", "text": f"All renders failed: {'; '.join(errors)}"}]
 
-        with open(screenshot_path, "rb") as f:
-            data = base64.standard_b64encode(f.read()).decode("ascii")
+        if errors:
+            content.append({"type": "text", "text": f"Some views failed: {'; '.join(errors)}"})
 
-        os.unlink(screenshot_path)
+        return content
 
-        return [{"type": "image", "data": data, "mimeType": "image/png"}]
-
-    except FileNotFoundError:
-        return [{"type": "text", "text": "grim or hyprctl not found. Install grim for Wayland screenshots."}]
     except Exception as e:
-        return [{"type": "text", "text": f"Screenshot error: {e}"}]
+        return [{"type": "text", "text": f"Scan error: {e}"}]
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 # ── Tool call handlers ──
 
@@ -603,7 +748,14 @@ def handle_tool_call(name, arguments, session_dir):
             f"  [{f['category']}] {f['key']} = {f['value']} {f['unit']}"
             for f in spec_fields
         )
-        return [{"type": "text", "text": f"Spec marked complete with {len(spec_fields)} fields. Awaiting user confirmation to advance.\n{summary}"}]
+        # Auto-generate goal.md from spec fields
+        if session_dir:
+            goal = generate_goal_document(spec_fields)
+            goal_path = os.path.join(session_dir, "goal.md")
+            os.makedirs(session_dir, exist_ok=True)
+            with open(goal_path, "w") as f:
+                f.write(goal)
+        return [{"type": "text", "text": f"Spec marked complete with {len(spec_fields)} fields. goal.md generated. Awaiting user confirmation to advance.\n{summary}"}]
 
     if name == "propose_component_tree":
         components = arguments.get("components", [])
@@ -627,7 +779,7 @@ def handle_tool_call(name, arguments, session_dir):
         return handle_import_step(arguments, session_dir)
 
     if name == "screenshot_viewer":
-        return capture_viewer_screenshot(session_dir)
+        return scan_model(session_dir)
 
     if name == "open_viewer":
         if session_dir:
@@ -661,9 +813,29 @@ def handle_tool_call(name, arguments, session_dir):
         if output_dir:
             result = run_cadquery_build(content, output_dir, session_root=session_dir, label=label)
             if result["success"]:
-                return [{"type": "text", "text": f"File written: {rel_path}\nBuild successful! Dimensions: {result['dimensions']}mm. STL: {result['stl_path']}. Viewer will auto-reload."}]
+                build_info = f"File written: {rel_path}\nBuild successful! Dimensions: {result['dimensions']}mm."
+                if result.get("topology"):
+                    build_info += f"\nTopology: {result['topology']}"
+                if result.get("holes"):
+                    build_info += f"\nCylindrical features: {result['holes']}"
+                build_info += "\nViewer will auto-reload. Use screenshot_viewer to verify geometry."
+                return [{"type": "text", "text": build_info}]
             else:
-                return [{"type": "text", "text": f"File written: {rel_path}\nBuild failed:\n{result['error']}"}]
+                error = result['error']
+                # Categorize error for Claude
+                hint = ""
+                error_lower = error.lower()
+                if "nameerror" in error_lower or "undefined" in error_lower:
+                    hint = "\nHint: A variable or import is missing. Check that all names are defined."
+                elif "syntaxerror" in error_lower:
+                    hint = "\nHint: Python syntax error. Check indentation, brackets, and colons."
+                elif "standard_boolean" in error_lower or "boolean" in error_lower:
+                    hint = "\nHint: Boolean operation failed — shapes may not overlap, or one may be empty. Check dimensions and positions."
+                elif "no wire" in error_lower or "wire" in error_lower:
+                    hint = "\nHint: CadQuery sketch/wire error. Check that profiles are closed and valid."
+                elif "timed out" in error_lower:
+                    hint = "\nHint: Build took too long. Simplify geometry or reduce fillet/chamfer operations."
+                return [{"type": "text", "text": f"File written: {rel_path}\nBuild failed:\n{error[-1500:]}{hint}"}]
         return [{"type": "text", "text": f"File written: {rel_path}"}]
 
     if name == "read_file":

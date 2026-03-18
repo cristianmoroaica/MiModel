@@ -117,6 +117,13 @@ impl<'a> InputBar<'a> {
         self.textarea.lines().join("\n")
     }
 
+    /// Replace the entire input content (for auto-complete).
+    pub fn set_content(&mut self, text: &str) {
+        self.set_textarea_content(text.to_string());
+        self.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
+        self.textarea.move_cursor(tui_textarea::CursorMove::End);
+    }
+
     /// Set a prefix badge (e.g. "[2 images]").
     pub fn set_badge(&mut self, badge: &str) {
         let title = if badge.is_empty() {

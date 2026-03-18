@@ -359,8 +359,10 @@ impl<'a> App<'a> {
                 match std::fs::copy(stl_src, &dest) {
                     Ok(_) => {
                         self.conversation.add("system", &format!("Saved part '{part_name}.stl' to {}", dest_dir.display()));
-                        // Also save the code alongside
-                        if let Some(ref code) = self.session.current_code {
+                        // Find and save the latest code.py alongside
+                        let code = self.session.current_code.clone()
+                            .or_else(|| self.find_latest_code_py());
+                        if let Some(code) = code {
                             let code_dest = dest_dir.join(format!("{part_name}.py"));
                             let _ = std::fs::write(&code_dest, code);
                         }
@@ -510,6 +512,44 @@ impl<'a> App<'a> {
                 }
                 self.pending_images.extend(files);
             }
+            return;
+        }
+
+        // Handle /import command — import a STEP file into the session
+        if text.starts_with("/import") {
+            let args = text.strip_prefix("/import").unwrap_or("").trim();
+            if args.is_empty() {
+                self.conversation.add("system", "Usage: /import <path/to/file.step>");
+                return;
+            }
+            // Extract path: find .step/.stp extension and take everything up to it
+            let path_str = {
+                let lower = args.to_lowercase();
+                let end = [".step", ".stp"].iter()
+                    .filter_map(|ext| lower.find(ext).map(|pos| pos + ext.len()))
+                    .min();
+                match end {
+                    Some(pos) => args[..pos].to_string(),
+                    None => {
+                        self.conversation.add("system", &format!("No .step/.stp file found in: {args}"));
+                        return;
+                    }
+                }
+            };
+            // Expand ~
+            let path_str = if path_str.starts_with("~/") {
+                dirs::home_dir()
+                    .map(|h| h.join(&path_str[2..]).to_string_lossy().to_string())
+                    .unwrap_or(path_str)
+            } else {
+                path_str
+            };
+            let source = std::path::Path::new(&path_str);
+            if !source.exists() {
+                self.conversation.add("system", &format!("File not found: {path_str}"));
+                return;
+            }
+            self.import_step_file(source);
             return;
         }
 
@@ -923,9 +963,33 @@ impl<'a> App<'a> {
             }
         }
 
+        // Include goal.md if it exists — this is the primary verification checklist
+        if let Some(ref dir) = self.session.active_dir {
+            let goal_path = dir.join("goal.md");
+            if goal_path.exists() {
+                if let Ok(goal) = std::fs::read_to_string(&goal_path) {
+                    parts.push(goal);
+                }
+            }
+        }
+
         // Include reference context
         if let Some(ref_ctx) = self.build_ref_context() {
             parts.push(ref_ctx);
+        }
+
+        // Include component context for Component phase
+        if self.phase == Phase::Component {
+            if let Some(comp_ctx) = self.build_component_context() {
+                parts.push(comp_ctx);
+            }
+        }
+
+        // Include prior build dimensions for Assembly/Refinement
+        if matches!(self.phase, Phase::Assembly | Phase::Refinement) {
+            if let Some(build_ctx) = self.build_prior_builds_context() {
+                parts.push(build_ctx);
+            }
         }
 
         if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
@@ -1130,6 +1194,9 @@ impl<'a> App<'a> {
                             "Tip: If the last build was interrupted, type 'undo' to restore the previous state.");
                     }
 
+                    // Restore right panel content
+                    self.restore_right_panel(&session_dir);
+
                     // Store session state
                     self.session.project_idx = Some(project_idx);
                     self.session.active_name = Some(session_name.clone());
@@ -1272,6 +1339,115 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Import a STEP file: ensure session exists, copy into it, run MCP import,
+    /// display results in conversation, and open the viewer.
+    fn import_step_file(&mut self, source: &std::path::Path) {
+        let filename = source.file_name().unwrap_or_default().to_string_lossy();
+
+        // Auto-create session if none active
+        if self.session.active_name.is_none() {
+            let stem = source.file_stem().unwrap_or_default().to_string_lossy();
+            let session_name: String = stem.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_')
+                .take(30)
+                .collect();
+            let session_name = if session_name.is_empty() { "imported".to_string() } else { session_name };
+            let project_path = self.session.project_idx
+                .and_then(|idx| self.projects.get(idx))
+                .map(|p| p.path.clone())
+                .unwrap_or_else(|| storage::project::root_dir().join("Untitled"));
+            let session_dir = project_path.join(&session_name);
+            self.viewer.set_working_dir(&session_dir);
+            self.session.active_name = Some(session_name);
+            self.session.active_dir = Some(session_dir);
+        }
+
+        // Ensure PhaseSession exists
+        if self.session.phase_session.is_none() {
+            if let Some(dir) = self.session.active_dir.clone() {
+                self.session.create(dir, self.build_timeout, self.python_path.clone());
+            }
+        }
+
+        let session_dir = match self.session.active_dir {
+            Some(ref d) => d.clone(),
+            None => {
+                self.conversation.add("system", "No session directory available.");
+                return;
+            }
+        };
+
+        // Copy STEP into session
+        let target_dir = session_dir.join("imported");
+        let _ = std::fs::create_dir_all(&target_dir);
+        let dest_step = target_dir.join("imported.step");
+        if let Err(e) = std::fs::copy(source, &dest_step) {
+            self.conversation.add("system", &format!("Failed to copy STEP: {e}"));
+            return;
+        }
+
+        self.conversation.add("system", &format!("Importing {filename}..."));
+
+        // Build STL from the STEP via CadQuery subprocess
+        let build_code = format!(
+            "import cadquery as cq\nresult = cq.importers.importStep(\"{}\")",
+            dest_step.to_string_lossy().replace('\\', "/")
+        );
+
+        // Use the session's build infrastructure
+        let stl_path = target_dir.join("result.stl");
+        let step_path = target_dir.join("result.step");
+        let export_code = format!(
+            "{build_code}\n\nimport cadquery as cq\ncq.exporters.export(result, \"{}\")\ncq.exporters.export(result, \"{}\")\nbb = result.val().BoundingBox()\nprint(f\"DIMS:{{bb.xlen:.2f}}x{{bb.ylen:.2f}}x{{bb.zlen:.2f}}\")",
+            stl_path.to_string_lossy().replace('\\', "/"),
+            step_path.to_string_lossy().replace('\\', "/"),
+        );
+
+        let proc = std::process::Command::new(&self.python_path)
+            .arg("-c")
+            .arg(&export_code)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+
+        match proc {
+            Ok(output) if output.status.success() => {
+                // Extract dimensions
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let dims = stdout.lines()
+                    .find(|l| l.starts_with("DIMS:"))
+                    .map(|l| &l[5..])
+                    .unwrap_or("unknown");
+
+                // Copy to _buffer.stl
+                if stl_path.exists() {
+                    let _ = self.viewer.update_working_stl(&stl_path);
+                    if !self.viewer.is_running() {
+                        let _ = self.viewer.show();
+                    }
+                }
+
+                self.conversation.add("system", &format!(
+                    "Imported {filename} ({dims}mm)\nCopied to imported/imported.step\nModel loaded in viewer.\n\nYou can now describe changes, or type 'advance' to work on it."
+                ));
+
+                // Jump to Component phase for editing
+                self.phase = Phase::Component;
+                self.layout_config.phase = Phase::Component;
+
+                self.session.save(self.phase);
+                self.refresh_projects();
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                self.conversation.add("system", &format!("Import build failed:\n{}", &stderr[..stderr.len().min(500)]));
+            }
+            Err(e) => {
+                self.conversation.add("system", &format!("Failed to run Python: {e}"));
+            }
+        }
+    }
+
     fn refresh_projects(&mut self) {
         self.projects = storage::project::list_projects().unwrap_or_default();
         let projects = self.projects.clone();
@@ -1298,6 +1474,205 @@ impl<'a> App<'a> {
             }
         }
         self.right_panel.set_refs(&lines.join("\n"));
+    }
+
+    /// Restore the right panel tabs (Spec, Refs, Model) from session files on disk.
+    fn restore_right_panel(&mut self, session_dir: &std::path::Path) {
+        // Restore Spec tab — prefer goal.md, fall back to spec.toml or conversation-extracted fields
+        let goal_path = session_dir.join("goal.md");
+        let spec_path = session_dir.join("spec.toml");
+        if goal_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&goal_path) {
+                self.right_panel.set_spec(&content);
+            }
+        } else if spec_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&spec_path) {
+                self.right_panel.set_spec(&content);
+            }
+        }
+
+        // Restore Refs tab — scan conversation for /ref usage and reload from library
+        self.active_refs.clear();
+        let ref_dir = reference::references_dir();
+        if ref_dir.exists() {
+            // Scan session conversations for reference slugs
+            if let Some(ref ps) = self.session.phase_session {
+                for (_, entries) in &ps.conversations {
+                    for entry in entries {
+                        if entry.role == "system" && entry.content.contains("Loaded reference") {
+                            // Extract slug from "Saved reference 'X' as slug.toml" or "Loaded reference:"
+                            // Simpler: scan for known slugs in the message
+                            if let Ok(library) = reference::load_library() {
+                                for (_, slug) in &library {
+                                    if entry.content.contains(slug) && !self.active_refs.contains(slug) {
+                                        self.active_refs.push(slug.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Also check if any /ref commands are in conversation
+            let all_convos = self.session.conversations(Phase::Spec);
+            for entry in all_convos {
+                if entry.content.starts_with("/ref ") {
+                    let name = entry.content.strip_prefix("/ref ").unwrap_or("").trim();
+                    if let Ok((_, slug)) = reference::load_one(name) {
+                        if !self.active_refs.contains(&slug) {
+                            self.active_refs.push(slug);
+                        }
+                    }
+                }
+            }
+        }
+        self.refresh_refs_panel();
+
+        // Restore Model tab — show info about the latest build
+        if let Some(stl_path) = self.session.latest_stl_path() {
+            let size_kb = std::fs::metadata(&stl_path).map(|m| m.len() / 1024).unwrap_or(0);
+            let mut model_info = format!("Latest build: {} ({size_kb}KB)", stl_path.file_name().unwrap_or_default().to_string_lossy());
+
+            // Find and show the latest code.py location
+            if let Some(code) = self.find_latest_code_py() {
+                let line_count = code.lines().count();
+                // Extract UPPERCASE params from code
+                let params: Vec<&str> = code.lines()
+                    .filter(|l| {
+                        let trimmed = l.trim();
+                        trimmed.contains('=') && !trimmed.starts_with('#') && {
+                            let name = trimmed.split('=').next().unwrap_or("").trim();
+                            name == name.to_uppercase() && name.len() > 1 && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        }
+                    })
+                    .collect();
+                model_info.push_str(&format!("\nCode: {line_count} lines, {} parameters", params.len()));
+                if !params.is_empty() {
+                    for p in params.iter().take(10) {
+                        model_info.push_str(&format!("\n  {}", p.trim()));
+                    }
+                }
+            }
+            self.right_panel.set_model(&model_info);
+        }
+    }
+
+    /// Find the latest code.py in the session (refinement > assembly > components).
+    fn find_latest_code_py(&self) -> Option<String> {
+        let dir = self.session.active_dir.as_ref()?;
+        // Check in priority order: refinement, assembly, then components
+        for subdir in &["refinement", "assembly"] {
+            let code_path = dir.join(subdir).join("code.py");
+            if code_path.exists() {
+                return std::fs::read_to_string(&code_path).ok();
+            }
+        }
+        // Check components — find the most recently modified code.py
+        let comp_dir = dir.join("components");
+        if comp_dir.is_dir() {
+            let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+            if let Ok(entries) = std::fs::read_dir(&comp_dir) {
+                for entry in entries.flatten() {
+                    let code_path = entry.path().join("code.py");
+                    if code_path.exists() {
+                        if let Ok(meta) = std::fs::metadata(&code_path) {
+                            let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                            if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
+                                best = Some((mtime, code_path));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((_, path)) = best {
+                return std::fs::read_to_string(&path).ok();
+            }
+        }
+        // Check imported
+        let imported = dir.join("imported").join("code.py");
+        if imported.exists() {
+            return std::fs::read_to_string(&imported).ok();
+        }
+        None
+    }
+
+    /// Build context about the current component being worked on.
+    fn build_component_context(&self) -> Option<String> {
+        let idx = self.component_list.selected();
+        let comp_id = self.component_list.selected_id()?;
+        let total = self.component_list.len();
+
+        let mut lines = vec![
+            format!("## Current Component ({}/{})", idx + 1, total),
+            format!("ID: {comp_id}"),
+        ];
+
+        // Extract component info from the decomposition tree
+        let tree_text = self.component_tree_panel.as_text();
+        if !tree_text.is_empty() {
+            lines.push(format!("Component tree:\n{tree_text}"));
+        }
+
+        // Show what's already been built (approved components with dimensions)
+        if let Some(ref session_dir) = self.session.active_dir {
+            let comp_dir = session_dir.join("components");
+            if comp_dir.exists() {
+                let mut built = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&comp_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            let id = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            let stl = path.join("result.stl");
+                            if stl.exists() && id != comp_id {
+                                let size = std::fs::metadata(&stl).map(|m| m.len()).unwrap_or(0);
+                                built.push(format!("  {id}: built (STL {:.0}KB)", size as f64 / 1024.0));
+                            }
+                        }
+                    }
+                }
+                if !built.is_empty() {
+                    lines.push(format!("Already built:\n{}", built.join("\n")));
+                    lines.push("Use read_file to examine prior components' code.py if you need to match dimensions.".to_string());
+                }
+            }
+        }
+
+        Some(lines.join("\n"))
+    }
+
+    /// Build context about prior component builds for Assembly/Refinement phases.
+    fn build_prior_builds_context(&self) -> Option<String> {
+        let session_dir = self.session.active_dir.as_ref()?;
+        let comp_dir = session_dir.join("components");
+        if !comp_dir.exists() { return None; }
+
+        let mut lines = vec!["## Built Components".to_string()];
+        let mut found = false;
+
+        if let Ok(entries) = std::fs::read_dir(&comp_dir) {
+            let mut dirs: Vec<_> = entries.flatten().filter(|e| e.path().is_dir()).collect();
+            dirs.sort_by_key(|e| e.file_name());
+
+            for entry in dirs {
+                let path = entry.path();
+                let id = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let step = path.join("result.step");
+                let code = path.join("code.py");
+                if step.exists() {
+                    found = true;
+                    lines.push(format!("  {id}:"));
+                    lines.push(format!("    STEP: components/{id}/result.step"));
+                    if code.exists() {
+                        lines.push(format!("    Code: components/{id}/code.py"));
+                    }
+                }
+            }
+        }
+
+        if !found { return None; }
+        lines.push("\nUse read_file to examine component code for exact dimensions and positioning.".to_string());
+        Some(lines.join("\n"))
     }
 
     /// Dispatch an MCP tool call from Claude's stream to the appropriate handler.

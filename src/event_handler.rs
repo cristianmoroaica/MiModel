@@ -197,6 +197,14 @@ impl<'a> App<'a> {
                 return;
             }
             (Tab, _) => {
+                // Try auto-complete if focused on Input with /ref or /import
+                if self.focus == Focus::Input {
+                    let current = self.input_bar.text();
+                    if current.starts_with("/ref ") || current.starts_with("/import ") {
+                        self.try_autocomplete();
+                        return;
+                    }
+                }
                 self.focus = match self.focus {
                     Focus::Input => Focus::Conversation,
                     Focus::Conversation => Focus::RightPanel,
@@ -457,6 +465,118 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Auto-complete /ref and /import commands on Tab.
+    fn try_autocomplete(&mut self) {
+        let current = self.input_bar.text();
+
+        if let Some(query) = current.strip_prefix("/ref ") {
+            // Complete from reference library
+            let query_lower = query.to_lowercase();
+            let library = reference::load_library().unwrap_or_default();
+            let mut matches: Vec<String> = library.iter()
+                .map(|(comp, _slug)| comp.identity.name.clone())
+                .filter(|name| name.to_lowercase().contains(&query_lower))
+                .collect();
+            matches.sort();
+            matches.dedup();
+
+            if matches.len() == 1 {
+                // Single match — complete it
+                self.input_bar.set_content(&format!("/ref {}", matches[0]));
+            } else if !matches.is_empty() {
+                // Multiple matches — show them
+                let list = matches.iter().take(10)
+                    .map(|m| format!("  {m}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.conversation.add("system", &format!("Matches:\n{list}"));
+            } else {
+                // Also try matching slugs
+                let slug_matches: Vec<&str> = library.iter()
+                    .map(|(_, slug)| slug.as_str())
+                    .filter(|s| s.contains(&query_lower))
+                    .collect();
+                if slug_matches.len() == 1 {
+                    self.input_bar.set_content(&format!("/ref {}", slug_matches[0]));
+                } else if !slug_matches.is_empty() {
+                    let list = slug_matches.iter().take(10)
+                        .map(|m| format!("  {m}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.conversation.add("system", &format!("Matches:\n{list}"));
+                }
+            }
+        } else if let Some(partial) = current.strip_prefix("/import ") {
+            // Filesystem path completion for .step/.stp files
+            let partial = if partial.starts_with("~/") {
+                dirs::home_dir()
+                    .map(|h| h.join(&partial[2..]).to_string_lossy().to_string())
+                    .unwrap_or_else(|| partial.to_string())
+            } else if partial.is_empty() {
+                dirs::home_dir()
+                    .map(|h| h.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "/".to_string())
+            } else {
+                partial.to_string()
+            };
+
+            let path = std::path::Path::new(&partial);
+            let (dir, prefix) = if path.is_dir() {
+                (path.to_path_buf(), String::new())
+            } else {
+                let dir = path.parent().unwrap_or(std::path::Path::new("/"));
+                let prefix = path.file_name()
+                    .map(|f| f.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                (dir.to_path_buf(), prefix)
+            };
+
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                let mut matches: Vec<std::path::PathBuf> = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                        if !prefix.is_empty() && !name.starts_with(&prefix) {
+                            return false;
+                        }
+                        // Show directories and .step/.stp files
+                        if p.is_dir() { return true; }
+                        matches!(p.extension().and_then(|e| e.to_str()),
+                            Some("step") | Some("stp") | Some("STEP") | Some("STP"))
+                    })
+                    .collect();
+                matches.sort();
+
+                if matches.len() == 1 {
+                    let m = &matches[0];
+                    let display = m.to_string_lossy();
+                    let suffix = if m.is_dir() { "/" } else { "" };
+                    self.input_bar.set_content(&format!("/import {display}{suffix}"));
+                } else if !matches.is_empty() {
+                    let list = matches.iter().take(15)
+                        .map(|m| {
+                            let name = m.file_name().unwrap_or_default().to_string_lossy();
+                            if m.is_dir() { format!("  {name}/") } else { format!("  {name}") }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.conversation.add("system", &format!("Files:\n{list}"));
+
+                    // Find longest common prefix for partial completion
+                    let strs: Vec<String> = matches.iter()
+                        .map(|m| m.to_string_lossy().to_string())
+                        .collect();
+                    if let Some(lcp) = longest_common_prefix(&strs) {
+                        if lcp.len() > partial.len() {
+                            self.input_bar.set_content(&format!("/import {lcp}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Handle pasted text (from bracketed paste / drag-and-drop).
     /// Detects file paths and attaches them; inserts remaining text into input.
     pub(crate) fn handle_paste(&mut self, pasted: String) {
@@ -499,4 +619,21 @@ impl<'a> App<'a> {
             }
         }
     }
+}
+
+/// Find the longest common prefix among a set of strings.
+fn longest_common_prefix(strings: &[String]) -> Option<String> {
+    if strings.is_empty() { return None; }
+    let first = &strings[0];
+    let mut len = first.len();
+    for s in &strings[1..] {
+        len = len.min(s.len());
+        for (i, (a, b)) in first.bytes().zip(s.bytes()).enumerate() {
+            if a != b {
+                len = len.min(i);
+                break;
+            }
+        }
+    }
+    if len == 0 { None } else { Some(first[..len].to_string()) }
 }

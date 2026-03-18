@@ -222,10 +222,9 @@ impl ProjectTreePane {
     pub fn file_action(path: &Path) -> FileAction {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         match ext {
-            "stl" => FileAction::OpenViewer(path.to_path_buf()),
-            "py" | "md" | "txt" | "toml" | "log" => FileAction::LoadText(path.to_path_buf()),
+            "stl" | "step" | "stp" => FileAction::OpenViewer(path.to_path_buf()),
+            "py" | "md" | "txt" | "toml" | "log" | "json" => FileAction::LoadText(path.to_path_buf()),
             "png" | "jpg" | "jpeg" | "pdf" => FileAction::AttachFile(path.to_path_buf()),
-            // step, json — no action
             _ => FileAction::None,
         }
     }

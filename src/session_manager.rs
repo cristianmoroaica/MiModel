@@ -201,6 +201,14 @@ impl SessionManager {
     }
 
     pub fn latest_stl_path(&self) -> Option<PathBuf> {
+        // First check _buffer.stl in session dir (MCP builds write here)
+        if let Some(ref dir) = self.active_dir {
+            let buffer = dir.join("_buffer.stl");
+            if buffer.exists() {
+                return Some(buffer);
+            }
+        }
+        // Fallback: legacy iter_NNN.stl in temp dir
         let p = self.temp_dir.join(format!("iter_{:03}.stl", self.iteration));
         if p.exists() { Some(p) } else { None }
     }
