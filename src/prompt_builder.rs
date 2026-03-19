@@ -44,6 +44,58 @@ pub fn load_phase_system_prompt(phase_name: &str) -> Result<String, String> {
     ))
 }
 
+/// Load all engineering knowledge files from `prompts/knowledge/`.
+///
+/// Returns a combined string of all `.md` files in the knowledge directory,
+/// suitable for appending to build-phase system prompts.
+pub fn load_engineering_knowledge() -> String {
+    let starts: Vec<std::path::PathBuf> = [
+        std::env::current_dir().ok(),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    for start in &starts {
+        let mut dir = start.as_path();
+        loop {
+            let knowledge_dir = dir.join("prompts").join("knowledge");
+            if knowledge_dir.is_dir() {
+                let mut sections = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&knowledge_dir) {
+                    let mut files: Vec<_> = entries
+                        .flatten()
+                        .filter(|e| {
+                            e.path().extension().map_or(false, |ext| ext == "md")
+                        })
+                        .collect();
+                    files.sort_by_key(|e| e.file_name());
+                    for entry in files {
+                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                            sections.push(content);
+                        }
+                    }
+                }
+                if !sections.is_empty() {
+                    return format!(
+                        "\n\n---\n\n# Engineering Knowledge Base\n\n{}\n",
+                        sections.join("\n\n---\n\n")
+                    );
+                }
+                return String::new();
+            }
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => break,
+            }
+        }
+    }
+    String::new()
+}
+
 /// Build the user message for the **spec** phase.
 ///
 /// Passes the latest question from Claude and the user's answer so that

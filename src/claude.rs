@@ -316,6 +316,11 @@ pub fn send_with_phase_prompt(
 ) -> Result<(String, Option<String>), String> {
     let mut system_prompt = crate::prompt_builder::load_phase_system_prompt(phase_name)?;
 
+    // Inject engineering knowledge for build phases
+    if matches!(phase_name, "build" | "component" | "assembly" | "refinement" | "refine" | "lead") {
+        system_prompt.push_str(&crate::prompt_builder::load_engineering_knowledge());
+    }
+
     if let Some(ctx) = ref_context {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(ctx);
