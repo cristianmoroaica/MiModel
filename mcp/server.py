@@ -953,33 +953,63 @@ def handle_tool_call(name, arguments, session_dir):
             with urllib.request.urlopen(req, timeout=30) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 if "pdf" in content_type.lower() or url.lower().endswith(".pdf"):
-                    # Download PDF and extract text with pymupdf
+                    # Download PDF: extract text + render pages as images for vision
                     try:
                         import pymupdf
                     except ImportError:
                         return [{"type": "text", "text": f"URL points to a PDF but pymupdf is not installed. Run: pip install pymupdf"}]
                     import tempfile
+                    import base64
                     pdf_data = resp.read(10 * 1024 * 1024)  # 10MB limit
                     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                         tmp.write(pdf_data)
                         tmp_path = tmp.name
                     try:
                         doc = pymupdf.open(tmp_path)
-                        pages = []
-                        for page_num in range(min(len(doc), 20)):  # cap at 20 pages
-                            page_text = doc[page_num].get_text()
-                            if page_text.strip():
-                                pages.append(f"--- Page {page_num + 1} ---\n{page_text.strip()}")
                         total_pages = len(doc)
+                        max_pages = min(total_pages, 8)  # cap rendered pages
+                        content_blocks = []
+                        text_pages = []
+
+                        for page_num in range(max_pages):
+                            page = doc[page_num]
+
+                            # Extract text layer
+                            page_text = page.get_text().strip()
+                            if page_text:
+                                text_pages.append(f"--- Page {page_num + 1} text ---\n{page_text}")
+
+                            # Render page as image (150 DPI for readability without being huge)
+                            mat = pymupdf.Matrix(150 / 72, 150 / 72)
+                            pix = page.get_pixmap(matrix=mat)
+                            img_data = pix.tobytes("png")
+                            img_b64 = base64.standard_b64encode(img_data).decode("ascii")
+                            content_blocks.append({
+                                "type": "image",
+                                "data": img_b64,
+                                "mimeType": "image/png",
+                            })
+
                         doc.close()
-                        text = "\n\n".join(pages)
-                        if not text:
-                            text = "(PDF contains no extractable text — may be a scanned image.)"
-                        if len(text) > max_length:
-                            text = text[:max_length] + f"\n\n... (truncated at {max_length} chars, {total_pages} pages total)"
+
+                        # Combine: text summary first, then page images
+                        result = []
+                        if text_pages:
+                            text = "\n\n".join(text_pages)
+                            if len(text) > max_length:
+                                text = text[:max_length] + "\n... (text truncated)"
+                            result.append({"type": "text", "text": f"PDF: {total_pages} pages. Extracted text:\n\n{text}"})
+                        else:
+                            result.append({"type": "text", "text": f"PDF: {total_pages} pages. No extractable text — rendering pages as images for visual reading."})
+
+                        result.extend(content_blocks)
+
+                        if total_pages > max_pages:
+                            result.append({"type": "text", "text": f"(Showing first {max_pages} of {total_pages} pages)"})
+
                     finally:
                         os.unlink(tmp_path)
-                    return [{"type": "text", "text": text}]
+                    return result
                 raw = resp.read(max_length * 2)
                 charset = "utf-8"
                 if "charset=" in content_type:
