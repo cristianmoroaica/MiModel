@@ -22,6 +22,68 @@ def send_error(id, code, message):
     sys.stdout.write(msg + "\n")
     sys.stdout.flush()
 
+# ── Web fetch + Reference library tools ──
+
+import time
+import re as _re
+import urllib.request
+import urllib.error
+
+def _references_dir():
+    """Return the global references directory: ~/MiModel/references/"""
+    return os.path.join(os.path.expanduser("~"), "MiModel", "references")
+
+FETCH_URL_TOOL = {
+    "name": "fetch_url",
+    "description": (
+        "Fetch content from a URL. Use this to verify component specs against manufacturer "
+        "datasheets and documentation. Returns text content extracted from the page. "
+        "Works with HTML pages and plain text. PDFs are downloaded but cannot be parsed — "
+        "use HTML datasheet pages instead when available."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "The URL to fetch"},
+            "max_length": {"type": "integer", "description": "Max characters to return (default 10000)", "default": 10000}
+        },
+        "required": ["url"]
+    }
+}
+
+LIST_REFERENCES_TOOL = {
+    "name": "list_references",
+    "description": (
+        "List all component reference datasheets in the global library. "
+        "Returns names, categories, and key dimensions for each reference. "
+        "Use this to find available reference data before building."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+}
+
+READ_REFERENCE_TOOL = {
+    "name": "read_reference",
+    "description": (
+        "Read a specific component reference datasheet from the global library. "
+        "Returns the full TOML spec with identity, dimensions, constraints, and mounting info. "
+        "Use the filename (without .toml) or a search term to find the reference."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Reference filename without .toml (e.g. 'nema_23_stepper_motor_standard_frame') or a search term (e.g. 'nema 23', 'arduino')"
+            }
+        },
+        "required": ["query"]
+    }
+}
+
 # ── Shared tool definitions ──
 
 WRITE_FILE_TOOL = {
@@ -177,6 +239,9 @@ BUILD_TOOLS = [
     LIST_FILES_TOOL,
     SCREENSHOT_VIEWER_TOOL,
     IMPORT_STEP_TOOL,
+    LIST_REFERENCES_TOOL,
+    READ_REFERENCE_TOOL,
+    FETCH_URL_TOOL,
 ]
 
 REFINE_TOOLS = [
@@ -210,6 +275,9 @@ REFINE_TOOLS = [
     LIST_FILES_TOOL,
     SCREENSHOT_VIEWER_TOOL,
     IMPORT_STEP_TOOL,
+    LIST_REFERENCES_TOOL,
+    READ_REFERENCE_TOOL,
+    FETCH_URL_TOOL,
 ]
 
 PHASE_TOOLS = {
@@ -818,6 +886,93 @@ def handle_tool_call(name, arguments, session_dir):
                     hint = "\nHint: Build took too long. Simplify geometry or reduce fillet/chamfer operations."
                 return [{"type": "text", "text": f"File written: {rel_path}\nBuild failed:\n{error[-1500:]}{hint}"}]
         return [{"type": "text", "text": f"File written: {rel_path}"}]
+
+    if name == "list_references":
+        ref_dir = _references_dir()
+        if not os.path.exists(ref_dir):
+            return [{"type": "text", "text": "No reference library found at ~/MiModel/references/"}]
+        refs = []
+        for f in sorted(os.listdir(ref_dir)):
+            if f.endswith(".toml"):
+                path = os.path.join(ref_dir, f)
+                try:
+                    with open(path) as fh:
+                        content = fh.read()
+                    name_val, category, dims, section = "", "", {}, ""
+                    for line in content.split("\n"):
+                        line = line.strip()
+                        if line.startswith("["):
+                            section = line.strip("[]").strip()
+                        elif "=" in line and section == "identity":
+                            k, v = line.split("=", 1)
+                            k, v = k.strip(), v.strip().strip('"')
+                            if k == "name": name_val = v
+                            elif k == "category": category = v
+                        elif "=" in line and section == "dimensions":
+                            k, v = line.split("=", 1)
+                            k, v = k.strip(), v.strip().strip('"')
+                            if k != "units":
+                                dims[k] = v
+                    dim_summary = ", ".join(f"{k}={v}" for k, v in list(dims.items())[:5])
+                    refs.append(f"- **{name_val}** [{category}] ({f[:-5]})\n  {dim_summary}")
+                except Exception:
+                    refs.append(f"- {f[:-5]} (error reading)")
+        if not refs:
+            return [{"type": "text", "text": "Reference library is empty."}]
+        return [{"type": "text", "text": "## Reference Library\n\n" + "\n".join(refs)}]
+
+    if name == "read_reference":
+        query = arguments.get("query", "").lower().replace(" ", "_")
+        ref_dir = _references_dir()
+        if not os.path.exists(ref_dir):
+            return [{"type": "text", "text": "No reference library found at ~/MiModel/references/"}]
+        exact = os.path.join(ref_dir, query + ".toml")
+        if os.path.exists(exact):
+            with open(exact) as f:
+                return [{"type": "text", "text": f.read()}]
+        matches = [f for f in os.listdir(ref_dir) if f.endswith(".toml") and query in f.lower()]
+        if len(matches) == 1:
+            with open(os.path.join(ref_dir, matches[0])) as f:
+                return [{"type": "text", "text": f.read()}]
+        elif len(matches) > 1:
+            return [{"type": "text", "text": f"Multiple matches for '{query}': " + ", ".join(m[:-5] for m in matches) + "\nPlease be more specific."}]
+        return [{"type": "text", "text": f"No reference found matching '{query}'. Use list_references to see available references."}]
+
+    if name == "fetch_url":
+        url = arguments.get("url", "")
+        max_length = arguments.get("max_length", 10000)
+        if not url:
+            return [{"type": "text", "text": "No URL provided."}]
+        if not url.startswith(("http://", "https://")):
+            return [{"type": "text", "text": "URL must start with http:// or https://"}]
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "MiModel/0.3 (CAD reference checker)",
+                "Accept": "text/html, text/plain, application/json, */*",
+            })
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if "pdf" in content_type.lower():
+                    return [{"type": "text", "text": f"URL points to a PDF ({content_type}). PDF parsing is not supported. Try finding an HTML version of the datasheet."}]
+                raw = resp.read(max_length * 2)
+                charset = "utf-8"
+                if "charset=" in content_type:
+                    charset = content_type.split("charset=")[-1].split(";")[0].strip()
+                text = raw.decode(charset, errors="replace")
+                if "html" in content_type.lower() or "<html" in text[:500].lower():
+                    text = _re.sub(r'<script[^>]*>.*?</script>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
+                    text = _re.sub(r'<style[^>]*>.*?</style>', '', text, flags=_re.DOTALL | _re.IGNORECASE)
+                    text = _re.sub(r'<[^>]+>', ' ', text)
+                    text = _re.sub(r'\s+', ' ', text).strip()
+                if len(text) > max_length:
+                    text = text[:max_length] + f"\n\n... (truncated at {max_length} chars)"
+                return [{"type": "text", "text": text}]
+        except urllib.error.HTTPError as e:
+            return [{"type": "text", "text": f"HTTP error {e.code}: {e.reason} for {url}"}]
+        except urllib.error.URLError as e:
+            return [{"type": "text", "text": f"URL error: {e.reason} for {url}"}]
+        except Exception as e:
+            return [{"type": "text", "text": f"Failed to fetch URL: {e}"}]
 
     if name == "read_file":
         rel_path = arguments.get("path", "")
