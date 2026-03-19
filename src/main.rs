@@ -568,6 +568,7 @@ impl<'a> App<'a> {
                 self.viewer.set_working_dir(&session_dir);
                 self.session.active_name = Some(session_name);
                 self.session.active_dir = Some(session_dir);
+                self.refresh_projects();
             }
         }
 
@@ -575,6 +576,7 @@ impl<'a> App<'a> {
         if self.session.phase_session.is_none() {
             if let Some(dir) = self.session.active_dir.clone() {
                 self.session.create(dir, self.build_timeout, self.python_path.clone());
+                self.refresh_projects();
             }
         }
 
@@ -938,12 +940,22 @@ impl<'a> App<'a> {
             }
         }
 
-        // Include goal.md if it exists — this is the primary verification checklist
+        // Include goal.md — the structured verification checklist
         if let Some(ref dir) = self.session.active_dir {
             let goal_path = dir.join("goal.md");
             if goal_path.exists() {
                 if let Ok(goal) = std::fs::read_to_string(&goal_path) {
-                    parts.push(goal);
+                    parts.push(format!("## Verification Checklist (goal.md)\n{goal}"));
+                }
+            }
+            // Include spec_narrative.md — the full design discussion with context
+            // and rationale beyond what structured fields capture
+            let narrative_path = dir.join("spec_narrative.md");
+            if narrative_path.exists() {
+                if let Ok(narrative) = std::fs::read_to_string(&narrative_path) {
+                    if !narrative.is_empty() {
+                        parts.push(format!("## Full Spec Narrative\n{narrative}"));
+                    }
                 }
             }
         }
@@ -1424,10 +1436,18 @@ impl<'a> App<'a> {
 
     /// Restore the right panel tabs (Spec, Refs, Model) from session files on disk.
     fn restore_right_panel(&mut self, session_dir: &std::path::Path) {
-        // Restore Spec tab — prefer goal.md, fall back to spec.toml or conversation-extracted fields
+        // Restore Spec tab — prefer spec_narrative.md (full design discussion),
+        // fall back to goal.md (structured fields only), then spec.toml.
+        let narrative_path = session_dir.join("spec_narrative.md");
         let goal_path = session_dir.join("goal.md");
         let spec_path = session_dir.join("spec.toml");
-        if goal_path.exists() {
+        if narrative_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&narrative_path) {
+                self.right_panel.set_spec(&content);
+                // Also restore spec_panel so further appends work correctly
+                self.spec_panel.set_content(&content);
+            }
+        } else if goal_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&goal_path) {
                 self.right_panel.set_spec(&content);
             }
@@ -1645,6 +1665,27 @@ impl<'a> App<'a> {
                 self.right_panel.set_spec(&content);
             }
             "mark_spec_complete" => {
+                // Reload goal.md that MCP server just wrote — this is the
+                // structured verification checklist generated from spec_fields.
+                if let Some(ref dir) = self.session.active_dir {
+                    let goal_path = dir.join("goal.md");
+                    if goal_path.exists() {
+                        if let Ok(goal) = std::fs::read_to_string(&goal_path) {
+                            // Prepend goal.md to existing spec narrative
+                            let narrative = self.right_panel.spec_content.clone();
+                            let combined = if narrative.is_empty() {
+                                goal
+                            } else {
+                                format!("{}\n\n---\n\n## Spec Discussion\n{}", goal, narrative)
+                            };
+                            self.right_panel.set_spec(&combined);
+                            self.spec_panel.set_content(&combined);
+                            // Persist the combined narrative
+                            let narrative_path = dir.join("spec_narrative.md");
+                            let _ = std::fs::write(&narrative_path, &combined);
+                        }
+                    }
+                }
                 self.conversation.add("system", "Spec complete. Type 'advance' to move to Decompose phase.");
                 self.session.add_message(self.phase, "system", "Spec complete.");
             }
