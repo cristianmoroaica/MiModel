@@ -38,14 +38,17 @@ FETCH_URL_TOOL = {
     "description": (
         "Fetch content from a URL. Use this to verify component specs against manufacturer "
         "datasheets and documentation. Returns text content extracted from the page. "
-        "Works with HTML pages, plain text, and PDF documents (text is extracted from PDFs "
-        "automatically, up to 20 pages)."
+        "Works with HTML pages, plain text, and PDF documents. PDFs return both extracted "
+        "text and rendered page images for visual reading. Use start_page/end_page to "
+        "navigate large PDFs (e.g., fetch pages 9-15 for installation dimensions)."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
             "url": {"type": "string", "description": "The URL to fetch"},
-            "max_length": {"type": "integer", "description": "Max characters to return (default 10000)", "default": 10000}
+            "max_length": {"type": "integer", "description": "Max characters to return for HTML/text (default 10000)", "default": 10000},
+            "start_page": {"type": "integer", "description": "First page to render for PDFs (1-indexed, default 1)", "default": 1},
+            "end_page": {"type": "integer", "description": "Last page to render for PDFs (default: start_page + 7, max 8 pages per call)", "default": 0}
         },
         "required": ["url"]
     }
@@ -967,11 +970,22 @@ def handle_tool_call(name, arguments, session_dir):
                     try:
                         doc = pymupdf.open(tmp_path)
                         total_pages = len(doc)
-                        max_pages = min(total_pages, 8)  # cap rendered pages
+
+                        # Page range from arguments (1-indexed)
+                        start = max(1, arguments.get("start_page", 1))
+                        end_arg = arguments.get("end_page", 0)
+                        if end_arg <= 0:
+                            end = min(start + 7, total_pages)  # default: 8 pages from start
+                        else:
+                            end = min(end_arg, total_pages)
+                        # Cap at 8 pages per call
+                        if end - start + 1 > 8:
+                            end = start + 7
+
                         content_blocks = []
                         text_pages = []
 
-                        for page_num in range(max_pages):
+                        for page_num in range(start - 1, end):  # convert to 0-indexed
                             page = doc[page_num]
 
                             # Extract text layer
@@ -979,7 +993,7 @@ def handle_tool_call(name, arguments, session_dir):
                             if page_text:
                                 text_pages.append(f"--- Page {page_num + 1} text ---\n{page_text}")
 
-                            # Render page as image (150 DPI for readability without being huge)
+                            # Render page as image (150 DPI)
                             mat = pymupdf.Matrix(150 / 72, 150 / 72)
                             pix = page.get_pixmap(matrix=mat)
                             img_data = pix.tobytes("png")
@@ -994,18 +1008,26 @@ def handle_tool_call(name, arguments, session_dir):
 
                         # Combine: text summary first, then page images
                         result = []
+                        page_range = f"pages {start}-{end}" if start != end else f"page {start}"
                         if text_pages:
                             text = "\n\n".join(text_pages)
                             if len(text) > max_length:
                                 text = text[:max_length] + "\n... (text truncated)"
-                            result.append({"type": "text", "text": f"PDF: {total_pages} pages. Extracted text:\n\n{text}"})
+                            result.append({"type": "text", "text": f"PDF: {total_pages} pages total, showing {page_range}. Extracted text:\n\n{text}"})
                         else:
-                            result.append({"type": "text", "text": f"PDF: {total_pages} pages. No extractable text — rendering pages as images for visual reading."})
+                            result.append({"type": "text", "text": f"PDF: {total_pages} pages total, showing {page_range}. No extractable text — rendering as images."})
 
                         result.extend(content_blocks)
 
-                        if total_pages > max_pages:
-                            result.append({"type": "text", "text": f"(Showing first {max_pages} of {total_pages} pages)"})
+                        remaining_after = total_pages - end
+                        remaining_before = start - 1
+                        hints = []
+                        if remaining_before > 0:
+                            hints.append(f"pages 1-{start-1} before")
+                        if remaining_after > 0:
+                            hints.append(f"pages {end+1}-{total_pages} after")
+                        if hints:
+                            result.append({"type": "text", "text": f"({', '.join(hints)} — use start_page/end_page to navigate)"})
 
                     finally:
                         os.unlink(tmp_path)
