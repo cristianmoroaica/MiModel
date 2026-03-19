@@ -27,3 +27,4 @@ docs/superpowers/
 
 # OS
 .DS_Store
+.worktrees/
