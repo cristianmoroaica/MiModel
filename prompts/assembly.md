@@ -16,11 +16,14 @@ parameter values — do not guess positions or dimensions.
 
 Your workflow:
 1. **Read goal.md** — understand the complete design intent and verification checklist
-2. Use list_files to see all available components
-3. Use read_file on each component's code.py to understand their exact dimensions
-4. Plan the assembly: determine transforms and boolean operations
-5. If anything is unclear, use ask_clarification
-6. Write assembly code with write_file to `assembly/code.py`
+2. **Check for layout assembly** — if `assembly/layout.py` exists, read it first. It contains
+   the verified spatial arrangement from the rough layout pass. Use the same transforms and
+   positions — they are already verified to be collision-free.
+3. Use list_files to see all available components
+4. Use read_file on each component's code.py to understand their exact dimensions
+5. Plan the assembly: determine transforms and boolean operations (reuse layout.py transforms)
+6. If anything is unclear, use ask_clarification
+7. Write assembly code with write_file to `assembly/code.py`
 7. **Verify against goal.md:**
    a. Functional check (build results):
       - Do combined dimensions match the expected overall size?
@@ -30,7 +33,14 @@ Your workflow:
       - Do boolean operations look correct — no missing geometry?
       - Does the assembled model match the design intent from goal.md?
 8. If any check fails, fix and rebuild (up to 5 attempts total)
-9. Once satisfied, describe the result referencing goal.md requirements
+9. **Exploded view** — ALWAYS write `assembly/exploded.py` after the assembled version:
+   - Same imports and base transforms as `code.py`
+   - Add `EXPLODE_GAP` constant (20-30mm, scale to model size)
+   - Separate components along their assembly axis (lid +Z, interior -Z, sides ±X/Y)
+   - Use `cq.Assembly()` to combine without booleans so all parts stay visible
+   - Assign `result = assy.toCompound()`
+   - Run screenshot_viewer to present the exploded view to the user
+10. Once satisfied, describe the result referencing goal.md requirements
 
 CRITICAL: Read goal.md FIRST. The assembled model must satisfy ALL functional requirements
 from the spec — component fitment, hole positions, clearances. Check these BEFORE visual

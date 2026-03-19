@@ -298,6 +298,31 @@ PHASE_TOOLS = {
 
 spec_fields = []
 
+def _spec_fields_path(session_dir):
+    """Path to the persistent spec_fields store."""
+    if session_dir:
+        return os.path.join(session_dir, "spec_fields.json")
+    return None
+
+def _persist_spec_fields(session_dir):
+    """Write spec_fields to disk so they survive MCP server restarts."""
+    path = _spec_fields_path(session_dir)
+    if path:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(spec_fields, f, indent=2)
+
+def _load_spec_fields(session_dir):
+    """Restore spec_fields from disk if available."""
+    global spec_fields
+    path = _spec_fields_path(session_dir)
+    if path and os.path.exists(path):
+        try:
+            with open(path) as f:
+                spec_fields = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass  # Keep current (empty) list
+
 # ── Goal document generation ──
 
 def generate_goal_document(fields):
@@ -784,6 +809,7 @@ def handle_tool_call(name, arguments, session_dir):
         value = arguments.get("value", "")
         unit = arguments.get("unit", "")
         spec_fields.append({"category": category, "key": key, "value": value, "unit": unit})
+        _persist_spec_fields(session_dir)
         summary = "\n".join(
             f"  [{f['category']}] {f['key']} = {f['value']} {f['unit']}"
             for f in spec_fields
@@ -795,11 +821,17 @@ def handle_tool_call(name, arguments, session_dir):
             f"  [{f['category']}] {f['key']} = {f['value']} {f['unit']}"
             for f in spec_fields
         )
-        # Auto-generate goal.md from spec fields
+        # Auto-generate goal.md from spec fields — never overwrite with fewer fields
         if session_dir:
-            goal = generate_goal_document(spec_fields)
             goal_path = os.path.join(session_dir, "goal.md")
             os.makedirs(session_dir, exist_ok=True)
+            if os.path.exists(goal_path):
+                existing = open(goal_path).read()
+                existing_checks = existing.count("- [ ]")
+                new_checks = len(spec_fields)
+                if new_checks < existing_checks:
+                    return [{"type": "text", "text": f"Spec already finalized with {existing_checks} checks in goal.md (current session has {new_checks} fields). Refusing to overwrite with fewer fields. goal.md is immutable after completion.\n{summary}"}]
+            goal = generate_goal_document(spec_fields)
             with open(goal_path, "w") as f:
                 f.write(goal)
         return [{"type": "text", "text": f"Spec marked complete with {len(spec_fields)} fields. goal.md generated. Awaiting user confirmation to advance.\n{summary}"}]
@@ -848,6 +880,10 @@ def handle_tool_call(name, arguments, session_dir):
         full_path = os.path.normpath(os.path.join(session_dir, rel_path))
         if not full_path.startswith(os.path.normpath(session_dir)):
             return [{"type": "text", "text": "Path must be within the session directory."}]
+        # Protect spec artifacts from being overwritten by build agents
+        protected = {"goal.md", "spec_fields.json", "spec_narrative.md"}
+        if os.path.basename(rel_path) in protected:
+            return [{"type": "text", "text": f"Cannot overwrite {rel_path} — spec artifacts are immutable after spec phase completion."}]
         # Write the file
         try:
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -1123,6 +1159,9 @@ def main():
     args = parser.parse_args()
 
     tools = PHASE_TOOLS[args.phase]
+
+    # Restore persisted spec fields so mark_spec_complete works after MCP restart
+    _load_spec_fields(args.session_dir)
 
     for line in sys.stdin:
         line = line.strip()

@@ -972,6 +972,23 @@ impl<'a> App<'a> {
             }
         }
 
+        // Include layout assembly if it exists — spatial truth for detail pass
+        if matches!(self.phase, Phase::Build | Phase::Refine) {
+            if let Some(ref dir) = self.session.active_dir {
+                let layout_path = dir.join("assembly").join("layout.py");
+                if layout_path.exists() {
+                    if let Ok(layout) = std::fs::read_to_string(&layout_path) {
+                        parts.push(format!(
+                            "## Spatial Layout (assembly/layout.py)\n\
+                             This layout assembly establishes component positions. \
+                             Detail pass MUST preserve bounding boxes and mounting interfaces.\n\
+                             ```python\n{layout}\n```"
+                        ));
+                    }
+                }
+            }
+        }
+
         // Include prior build dimensions for Assembly/Refinement
         if matches!(self.phase, Phase::Build | Phase::Refine) {
             if let Some(build_ctx) = self.build_prior_builds_context() {
@@ -1579,8 +1596,21 @@ impl<'a> App<'a> {
             lines.push(format!("Component tree:\n{tree_text}"));
         }
 
-        // Show what's already been built (approved components with dimensions)
+        // Detect build pass: layout exists → detail pass, otherwise → rough pass
         if let Some(ref session_dir) = self.session.active_dir {
+            let layout_path = session_dir.join("assembly").join("layout.py");
+            let has_layout = layout_path.exists();
+
+            if has_layout {
+                lines.push("Build pass: DETAIL (layout assembly exists)".to_string());
+                lines.push("Refine the rough placeholder — add full detail but keep the same bounding box and mounting interfaces.".to_string());
+            } else if total > 1 {
+                lines.push("Build pass: ROUGH LAYOUT".to_string());
+                lines.push("Write a rough placeholder (bounding box + mounting features only, no fillets/labels/ribs).".to_string());
+                lines.push("After ALL placeholders are built, write assembly/layout.py to verify spatial fit.".to_string());
+            }
+
+            // Show what's already been built (approved components with dimensions)
             let comp_dir = session_dir.join("components");
             if comp_dir.exists() {
                 let mut built = Vec::new();
@@ -1599,7 +1629,7 @@ impl<'a> App<'a> {
                 }
                 if !built.is_empty() {
                     lines.push(format!("Already built:\n{}", built.join("\n")));
-                    lines.push("Use read_file to examine prior components' code.py if you need to match dimensions.".to_string());
+                    lines.push("Use read_file to examine prior components' code.py for dimensions and spatial constraints.".to_string());
                 }
             }
         }

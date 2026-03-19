@@ -69,6 +69,14 @@ impl<'a> App<'a> {
         spec_content.push_str(response);
         self.spec_panel.set_content(&spec_content);
         self.right_panel.set_spec(&spec_content);
+
+        // Persist the full spec narrative so it survives session reloads.
+        // goal.md only captures structured fields; this preserves the full
+        // design discussion (dimensions, rationale, context).
+        if let Some(ref dir) = self.session.active_dir {
+            let narrative_path = dir.join("spec_narrative.md");
+            let _ = std::fs::write(&narrative_path, &spec_content);
+        }
     }
 
     #[allow(dead_code)]
@@ -404,6 +412,11 @@ impl<'a> App<'a> {
         }
         self.phase = target;
         self.layout_config.phase = target;
+        // Force fresh Claude session so phase-specific system prompt and context
+        // (spec conversation, goal.md, references) are re-injected. Without this,
+        // --resume would continue the previous phase's session and silently drop
+        // the new phase's context.
+        self.claude.session_id = None;
         // Add system message about phase change
         self.conversation.add("system", &format!("Switched to {} phase", target.label()));
         self.session.save(self.phase);

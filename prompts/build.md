@@ -52,22 +52,82 @@ You have these tools available:
    - Simple part (single body): write directly to `components/<name>/code.py`
    - Multi-part (needs booleans/assembly): decompose into components
 
-### Step 2: Build components
-For each component:
-1. Write CadQuery code to `components/<id>/code.py`
-2. Each component is modeled **at the origin** — transforms happen in assembly
-3. Verify: check build results (dimensions, topology) against goal.md
-4. Run screenshot_viewer to visually confirm
-5. Fix and rebuild if needed (up to 5 attempts)
+### Step 2: Rough layout pass (multi-component or complex single-component)
 
-### Step 3: Assemble (if multi-component)
+**Before building ANY component in detail**, create rough placeholders for ALL components.
+This establishes spatial relationships and prevents collisions.
+
+For each component, write a **placeholder** to `components/<id>/code.py`:
+- Correct overall bounding box from spec and reference library
+- Mounting holes, bosses, and major cutouts at correct positions
+- NO fillets, chamfers, labels, ribs, vents, or aesthetic features
+- Keep it simple: 20-40 lines of CadQuery maximum
+- Build and verify dimensions against goal.md
+
+### Step 3: Layout assembly
+
+After ALL placeholders are built, write `assembly/layout.py`:
+1. Import all placeholder STEPs via `cq.importers.importStep()`
+2. Position each at its final location (translate/rotate)
+3. Apply boolean operations (cut, union, intersect)
+4. Verify: no overlapping volumes, adequate clearances, everything fits
+5. Run screenshot_viewer to visually confirm the spatial arrangement
+6. Fix any collisions or clearance violations before proceeding
+
+The layout assembly is the **spatial truth** for the detail pass.
+
+### Step 4: Detail pass
+
+For each component, refine the placeholder with full detail:
+1. Read `assembly/layout.py` to understand spatial constraints and neighbors
+2. Read neighboring components' `code.py` for interface dimensions
+3. Overwrite `components/<id>/code.py` with detailed geometry:
+   - Keep the SAME bounding box and mounting interfaces from the placeholder
+   - Add fillets, chamfers, ribs, vents, labels, internal features
+4. Verify each detailed component against goal.md
+5. Run screenshot_viewer to confirm
+
+### Step 5: Final assembly
+
 1. Write `assembly/code.py` that IMPORTS each `components/<id>/result.step`
-2. Apply transforms (translate, rotate) to position components relative to each other
+2. Use the same transforms as `assembly/layout.py` — positions should not change
 3. Apply boolean operations (cut, union, intersect) to combine
 4. Verify the assembled model against goal.md
 5. Run screenshot_viewer to confirm
 
-### Step 4: Approve
+### Step 6: Exploded view
+
+ALWAYS present an exploded view after the final assembly:
+
+1. Write `assembly/exploded.py` — same imports and transforms as `code.py`
+2. Add an `EXPLODE_GAP` constant (default 20-30mm, scale to model size)
+3. Instead of boolean operations, separate components along their assembly axis:
+   - Base component stays at origin
+   - Each other component gets an additional offset along its approach direction
+   - Lid/top → explode +Z, cavity/interior → explode -Z, side panels → explode ±X/Y
+4. Use `cq.Assembly()` to combine without booleans so all parts remain visible
+5. Run screenshot_viewer to present the exploded view to the user
+
+Example:
+```python
+import cadquery as cq
+import os
+
+EXPLODE_GAP = 25.0  # mm — adjust to model scale
+
+session = os.path.dirname(os.path.dirname(__file__))
+body = cq.importers.importStep(os.path.join(session, "components/body/result.step"))
+lid = cq.importers.importStep(os.path.join(session, "components/lid/result.step"))
+pcb_mount = cq.importers.importStep(os.path.join(session, "components/pcb_mount/result.step"))
+
+assy = cq.Assembly()
+assy.add(body, name="body")  # base stays at origin
+assy.add(lid, loc=cq.Location((0, 0, BODY_HEIGHT + EXPLODE_GAP)), name="lid")  # explode up
+assy.add(pcb_mount, loc=cq.Location((0, 0, -EXPLODE_GAP)), name="pcb_mount")  # explode down
+result = assy.toCompound()
+```
+
+### Step 7: Approve
 Call request_approval with a summary mapping results to goal.md requirements.
 
 ## File organization
