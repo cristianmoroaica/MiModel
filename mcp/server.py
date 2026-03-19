@@ -38,8 +38,8 @@ FETCH_URL_TOOL = {
     "description": (
         "Fetch content from a URL. Use this to verify component specs against manufacturer "
         "datasheets and documentation. Returns text content extracted from the page. "
-        "Works with HTML pages and plain text. PDFs are downloaded but cannot be parsed — "
-        "use HTML datasheet pages instead when available."
+        "Works with HTML pages, plain text, and PDF documents (text is extracted from PDFs "
+        "automatically, up to 20 pages)."
     ),
     "inputSchema": {
         "type": "object",
@@ -950,10 +950,36 @@ def handle_tool_call(name, arguments, session_dir):
                 "User-Agent": "MiModel/0.3 (CAD reference checker)",
                 "Accept": "text/html, text/plain, application/json, */*",
             })
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 content_type = resp.headers.get("Content-Type", "")
-                if "pdf" in content_type.lower():
-                    return [{"type": "text", "text": f"URL points to a PDF ({content_type}). PDF parsing is not supported. Try finding an HTML version of the datasheet."}]
+                if "pdf" in content_type.lower() or url.lower().endswith(".pdf"):
+                    # Download PDF and extract text with pymupdf
+                    try:
+                        import pymupdf
+                    except ImportError:
+                        return [{"type": "text", "text": f"URL points to a PDF but pymupdf is not installed. Run: pip install pymupdf"}]
+                    import tempfile
+                    pdf_data = resp.read(10 * 1024 * 1024)  # 10MB limit
+                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                        tmp.write(pdf_data)
+                        tmp_path = tmp.name
+                    try:
+                        doc = pymupdf.open(tmp_path)
+                        pages = []
+                        for page_num in range(min(len(doc), 20)):  # cap at 20 pages
+                            page_text = doc[page_num].get_text()
+                            if page_text.strip():
+                                pages.append(f"--- Page {page_num + 1} ---\n{page_text.strip()}")
+                        total_pages = len(doc)
+                        doc.close()
+                        text = "\n\n".join(pages)
+                        if not text:
+                            text = "(PDF contains no extractable text — may be a scanned image.)"
+                        if len(text) > max_length:
+                            text = text[:max_length] + f"\n\n... (truncated at {max_length} chars, {total_pages} pages total)"
+                    finally:
+                        os.unlink(tmp_path)
+                    return [{"type": "text", "text": text}]
                 raw = resp.read(max_length * 2)
                 charset = "utf-8"
                 if "charset=" in content_type:
